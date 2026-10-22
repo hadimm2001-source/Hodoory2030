@@ -1,0 +1,6 @@
+{
+  "name": "تقارير برنامج حضوري",
+  "description": "برنامج ذكي لمتابعة حضور وانضباط المعلمين والموظفين بمدرسة الجشة المتوسطة، يتيح استيراد ملفات البصمة وتحليل البيانات وإدارة الأعذار والتقارير.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
