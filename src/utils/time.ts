@@ -87,6 +87,8 @@ export function parseDate(v: any): Date | null {
   }
 
   let s = norm(v).replace(/[٠-٩]/g, d => '٠١٢٣٤٥٦٧٨٩'.indexOf(d).toString());
+  // Remove invisible RTL/LTR marks and whitespace
+  s = s.replace(/[\u200E\u200F\u202A-\u202E\uFEFF]/g, '').trim();
 
   if (/^\d+(\.\d+)?$/.test(s)) {
     const num = parseFloat(s);
@@ -94,6 +96,32 @@ export function parseDate(v: any): Date | null {
       const totalDays = Math.round(num);
       const d = new Date(Date.UTC(1899, 11, 30 + totalDays));
       return new Date(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+    }
+  }
+
+  // 1b. Check Arabic / English textual month names (e.g. "1 سبتمبر 2026", "2026-سبتمبر-01", "1 Sep 2026")
+  const arabicMonths: Record<string, number> = {
+    'يناير': 0, 'فبراير': 1, 'مارس': 2, 'أبريل': 3, 'ابريل': 3,
+    'مايو': 4, 'يونيو': 5, 'يوليو': 6, 'أغسطس': 7, 'اغسطس': 7,
+    'سبتمبر': 8, 'أكتوبر': 9, 'اكتوبر': 9, 'نوفمبر': 10, 'ديسمبر': 11,
+    'jan': 0, 'january': 0, 'feb': 1, 'february': 1, 'mar': 2, 'march': 2,
+    'apr': 3, 'april': 3, 'may': 4, 'jun': 5, 'june': 5, 'jul': 6, 'july': 6,
+    'aug': 7, 'august': 7, 'sep': 8, 'sept': 8, 'september': 8,
+    'oct': 9, 'october': 9, 'nov': 10, 'november': 10, 'dec': 11, 'december': 11
+  };
+
+  for (const [mName, mIdx] of Object.entries(arabicMonths)) {
+    if (s.toLowerCase().includes(mName)) {
+      // Extract numbers around the month name
+      const numbers = s.match(/\d+/g);
+      if (numbers && numbers.length >= 2) {
+        const n1 = parseInt(numbers[0], 10);
+        const n2 = parseInt(numbers[1], 10);
+        let y = n1 > 1000 ? n1 : (n2 > 1000 ? n2 : 2026);
+        let day = n1 > 1000 ? n2 : n1;
+        const d = new Date(y, mIdx, day);
+        if (!isNaN(d.getTime())) return d;
+      }
     }
   }
 
@@ -110,9 +138,16 @@ export function parseDate(v: any): Date | null {
   // 3. Check 4-digit year at end: DD-MM-YYYY or DD/MM/YYYY
   let mYearLast = s.match(/(\d{1,2})[-\/\.٫](\d{1,2})[-\/\.٫](\d{4})/);
   if (mYearLast) {
-    const day = +mYearLast[1];
-    const mo = +mYearLast[2] - 1;
+    const n1 = +mYearLast[1];
+    const n2 = +mYearLast[2];
     const y = +mYearLast[3];
+    let day = n1;
+    let mo = n2 - 1;
+    if (n2 > 12 && n1 <= 12) {
+      // MM-DD-YYYY detected
+      day = n2;
+      mo = n1 - 1;
+    }
     const d = new Date(y, mo, day);
     if (!isNaN(d.getTime())) return d;
   }

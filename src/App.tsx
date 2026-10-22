@@ -212,6 +212,26 @@ export default function App() {
     setDetailCardFilter(null);
   }, [monthlyEmployee, monthlyMonth, monthlyPeriodType, monthlyStartDate, monthlyEndDate]);
 
+  // Synchronize global filters to monthly report filters so selections carry over seamlessly
+  useEffect(() => {
+    if (selectedEmployee && selectedEmployee !== 'all') {
+      setMonthlyEmployee(selectedEmployee);
+    }
+  }, [selectedEmployee]);
+
+  useEffect(() => {
+    if (selectedPeriodType === 'range') {
+      setMonthlyPeriodType('range');
+      if (selectedStartDate) setMonthlyStartDate(selectedStartDate);
+      if (selectedEndDate) setMonthlyEndDate(selectedEndDate);
+    } else {
+      setMonthlyPeriodType('month');
+      if (selectedMonth && selectedMonth !== 'all') {
+        setMonthlyMonth(selectedMonth);
+      }
+    }
+  }, [selectedPeriodType, selectedStartDate, selectedEndDate, selectedMonth]);
+
   // Custom modals/popups
   const [modalOpen, setModalOpen] = useState(false);
   const [modalTitle, setModalTitle] = useState('');
@@ -725,10 +745,29 @@ export default function App() {
         const data = new Uint8Array(evt.target?.result as ArrayBuffer);
         const workbook = XLSX.read(data, { type: 'array' });
         
-        // Search across sheets for the one with the most relevant attendance data
-        let bestRawJson: any[][] = [];
-        let headerIndex = -1;
-        let foundSheet = workbook.SheetNames[0];
+        let parsedList: ParsedRow[] = [];
+        let ignoredNoName = 0;
+        let ignoredNoDate = 0;
+        let totalRawRowsCount = 0;
+
+        let stats: ImportStats = {
+          totalRows: 0,
+          imported: 0,
+          present: 0,
+          absence: 0,
+          excuse: 0,
+          other: 0,
+          missing: 0,
+          noName: 0,
+          noDate: 0,
+          ignored: 0
+        };
+
+        const presentWords = ['مكتملة', 'مكتمله', 'غير مكتملة', 'غير مكتمله', 'انصراف تلقائي', 'حاضر', 'حضور'];
+        const excuseWords = ['استئذان', 'استئيذان', 'إجازة', 'اجازة', 'انتداب', 'مهمة', 'طبي', 'عذر', 'مرضي', 'مهمة عمل'];
+
+        // Collect all sheets that contain relevant attendance/employee data
+        const sheetsToProcess: { sheetName: string; sheetJson: any[][]; headerIndex: number }[] = [];
 
         for (const sheetName of workbook.SheetNames) {
           const ws = workbook.Sheets[sheetName];
@@ -755,213 +794,195 @@ export default function App() {
           );
 
           if (hIdx >= 0) {
-            bestRawJson = sheetJson;
-            headerIndex = hIdx;
-            foundSheet = sheetName;
-            break;
+            sheetsToProcess.push({ sheetName, sheetJson, headerIndex: hIdx });
           }
         }
 
-        if (bestRawJson.length === 0) {
+        // Fallback to first sheet if no specific header was detected
+        if (sheetsToProcess.length === 0 && workbook.SheetNames.length > 0) {
           const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
-          bestRawJson = XLSX.utils.sheet_to_json(firstSheet, { header: 1, defval: '' });
-          headerIndex = 0;
+          const sheetJson: any[][] = XLSX.utils.sheet_to_json(firstSheet, { header: 1, defval: '' });
+          if (sheetJson && sheetJson.length > 0) {
+            sheetsToProcess.push({ sheetName: workbook.SheetNames[0], sheetJson, headerIndex: 0 });
+          }
         }
 
-        if (!bestRawJson || bestRawJson.length === 0) {
+        if (sheetsToProcess.length === 0) {
           alert('ملف Excel فارغ أو غير متوافق.');
           return;
         }
 
-        if (headerIndex < 0) headerIndex = 0;
-
-        // Try extracting any global date embedded in header/title rows (e.g. "تقرير الحضور ليوم 2026-02-15")
-        let globalDateFromTitle: Date | null = null;
-        for (let i = 0; i < headerIndex; i++) {
-          const rowText = (bestRawJson[i] || []).join(' ');
-          const extractedD = parseDate(rowText);
-          if (extractedD) {
-            globalDateFromTitle = extractedD;
-            break;
-          }
-        }
-
-        const headerRow = (bestRawJson[headerIndex] || []).map((h: any) => normKey(h) || '');
-        const dataRows = bestRawJson.slice(headerIndex + 1);
-
-        const objects = dataRows.map((r: any[]) => {
-          const obj: any = {};
-          headerRow.forEach((h: string, idx: number) => {
-            if (h) obj[h] = r[idx];
-          });
-          return obj;
-        });
-
-        let parsedList: ParsedRow[] = [];
-        let ignoredNoName = 0;
-        let ignoredNoDate = 0;
-
-        let stats: ImportStats = {
-          totalRows: objects.length,
-          imported: 0,
-          present: 0,
-          absence: 0,
-          excuse: 0,
-          other: 0,
-          missing: 0,
-          noName: 0,
-          noDate: 0,
-          ignored: 0
-        };
-
-        const presentWords = ['مكتملة', 'مكتمله', 'غير مكتملة', 'غير مكتمله', 'انصراف تلقائي', 'حاضر', 'حضور'];
-        const excuseWords = ['استئذان', 'استئيذان', 'إجازة', 'اجازة', 'انتداب', 'مهمة', 'طبي', 'عذر', 'مرضي', 'مهمة عمل'];
-
-        let lastValidDate: Date | null = globalDateFromTitle;
-
-        objects.forEach(o => {
-          const name = norm(getVal(o, [
-            'الإسم', 'الاسم', 'اسم الموظف', 'الموظف', 'اسم المعلم', 'المعلم', 
-            'اسم المستخدم', 'اسم المنسوب', 'المنسوب', 'المستخدم', 'الاسم الكامل', 
-            'اسم الموظف/المعلم', 'اسم المعلم/الموظف', 'Name', 'Employee Name'
-          ]));
-
-          if (!name || name === '-' || name.includes('الإجمالي') || name.includes('المجموع')) {
-            ignoredNoName++;
-            return;
-          }
-
-          const job = norm(getVal(o, [
-            'المسمى الوظيفي', 'المسمي الوظيفي', 'الوظيفة', 'الوظيفه', 'المسمى', 
-            'الصفة', 'الرتبة', 'المهنة', 'Job', 'Title', 'Position'
-          ])) || 'معلم / موظف';
-
-          const civil = norm(getVal(o, [
-            'السجل المدني', 'رقم الهوية', 'الهويه', 'الهوية', 'السجل', 
-            'رقم السجل المدني', 'الهوية الوطنية', 'الرقم الوظيفي', 'رقم الموظف', 'Civil ID', 'National ID', 'ID'
-          ]));
-
-          let rawDateVal = getVal(o, [
-            'التاريخ', 'اليوم والتاريخ', 'تاريخ التحضير', 'تاريخ الحضور', 
-            'تاريخ الحركة', 'تاريخ اليوم', 'تاريخ التسجيل', 'اليوم', 'التاريخ والوقت', 'Date'
-          ]);
-
-          let d = parseDate(rawDateVal);
-
-          // If row has no explicit date, inherit last valid date (for grouped/merged rows) or global title date
-          if (!d) {
-            d = lastValidDate;
-          } else {
-            lastValidDate = d;
-          }
-
-          if (!d) {
-            // Default to today if no date at all is found in whole file
-            d = new Date();
-          }
-
-          const status = norm(getVal(o, [
-            'حالة التحضير', 'حاله التحضير', 'الحالة', 'الحاله', 'حالة الحضور', 
-            'حالة البصمة', 'نوع التحضير', 'البيان', 'الوضع', 'حالة السجل', 'Status'
-          ]));
-
-          const tin = parseTime(getVal(o, [
-            'توقيت الحضور', 'وقت الحضور', 'الحضور', 'الدخول', 'توقيت الدخول', 
-            'وقت الدخول', 'بصمة الدخول', 'أول بصمة', 'بصمة الحضور', 'حضور', 'دخول', 
-            'وقت الحضور الفعلي', 'Check In', 'Check-in', 'Time In', 'In'
-          ]));
-
-          const tout = parseTime(getVal(o, [
-            'توقيت الإنصراف', 'توقيت الانصراف', 'وقت الانصراف', 'وقت الإنصراف', 
-            'الانصراف', 'الإنصراف', 'الخروج', 'وقت الخروج', 'توقيت الخروج', 
-            'بصمة الخروج', 'آخر بصمة', 'بصمة الانصراف', 'انصراف', 'خروج', 
-            'وقت الانصراف الفعلي', 'Check Out', 'Check-out', 'Time Out', 'Out'
-          ]));
-
-          // Determine record type
-          const normalizedStatus = norm(status);
-          const hasIn = !!(tin && tin.total != null && tin.text !== '-');
-          const hasOut = !!(tout && tout.total != null && tout.text !== '-');
-          const hasBiometrics = hasIn || hasOut;
-
-          const isEmergency = isEmergencyLeave(status);
-          const forcePresentWords = ['مهمة', 'انتداب', 'تكليف', 'مهمة عمل'];
-          const forceExcuseWords = ['إجازة', 'اجازة', 'طبي', 'عذر', 'مرضي', 'مرافقة', 'وضع', 'أمومة', 'امومة', 'وفاة', 'استثنائية', 'اضطرارية', 'غياب بعذر'];
-          const weekendWords = ['عطلة', 'عطله', 'نهاية الاسبوع', 'نهاية الأسبوع', 'راحة أسبوعية', 'راحة اسبوعية', 'إجازة أسبوعية', 'اجازة اسبوعية'];
-
-          const isForcePresent = forcePresentWords.some(w => normalizedStatus.includes(w));
-          const isExcuse = forceExcuseWords.some(w => normalizedStatus.includes(w));
-          const isWeekendDay = isWeekend(d, config.weekend);
-          const isOfficialHoliday = isHoliday(d, config.holidays);
-
-          let type: ParsedRow['type'] = 'absence';
-          let finalStatus = status;
-
-          if (weekendWords.some(w => normalizedStatus.includes(w)) || isWeekendDay || isOfficialHoliday) {
-            type = 'other';
-            finalStatus = 'عطلة أسبوعية / رسمية';
-          } else if (isEmergency) {
-            type = hasBiometrics ? 'present' : 'excuse';
-            finalStatus = status || 'استئذان طارئ';
-          } else if (isForcePresent) {
-            type = 'present';
-            finalStatus = status || 'مهمة عمل';
-          } else if (isExcuse) {
-            type = 'excuse';
-            finalStatus = status || 'غياب بعذر';
-          } else if (hasBiometrics) {
-            type = 'present';
-            finalStatus = (status && !['غير مكتملة', 'غير مكتمله', 'انصراف تلقائي', 'بدون سجل بصمة', 'غائب', 'غياب'].includes(status)) ? status : 'حاضر';
-          } else {
-            // No biometric punches at all, no duty/excuse -> ABSENT!
-            type = 'absence';
-            finalStatus = (status && (status.includes('غياب') || status.includes('غائب'))) ? status : 'غياب بدون عذر';
-          }
-
-          let checkState = '';
-          let earlyMins = 0;
-          let lateMins = 0;
-
-          const approvedSunWed = config.checkoutSunWed || '12:30';
-          const approvedThu = config.checkoutThu || '11:45';
-
-          if (type === 'present' || isEmergency) {
-            checkState = checkoutState(finalStatus, tin, tout, config.autoCheckout, config.workHours, d, approvedSunWed, approvedThu);
-            earlyMins = earlyCheckoutMins(tin, tout, finalStatus, config.autoCheckout, config.workHours, d, approvedSunWed, approvedThu);
-            lateMins = minsAfterStart(tin, config.start);
-
-            if (isForcePresent && !hasBiometrics) {
-              checkState = '';
-              earlyMins = 0;
-              lateMins = 0;
+        // Process every identified sheet (e.g. September sheet + October sheet)
+        for (const { sheetName, sheetJson, headerIndex } of sheetsToProcess) {
+          // Try extracting any global date embedded in header/title rows or sheet name
+          let globalDateFromTitle: Date | null = parseDate(sheetName);
+          for (let i = 0; i < headerIndex; i++) {
+            const rowText = (sheetJson[i] || []).join(' ');
+            const extractedD = parseDate(rowText);
+            if (extractedD) {
+              globalDateFromTitle = extractedD;
+              break;
             }
           }
 
-          parsedList.push({
-            name,
-            job,
-            civil,
-            date: d,
-            dateKey: dateKey(d),
-            month: monthKey(d),
-            status: finalStatus,
-            tin: hasIn ? tin : null,
-            tout: hasOut ? tout : null,
-            expected: expectedCheckout(tin, config.workHours, d, approvedSunWed, approvedThu),
-            checkout: checkState,
-            earlyMins,
-            type,
-            late: lateMins,
+          const headerRow = (sheetJson[headerIndex] || []).map((h: any) => normKey(h) || '');
+          const dataRows = sheetJson.slice(headerIndex + 1);
+          totalRawRowsCount += dataRows.length;
+
+          const objects = dataRows.map((r: any[]) => {
+            const obj: any = {};
+            headerRow.forEach((h: string, idx: number) => {
+              if (h) obj[h] = r[idx];
+            });
+            return obj;
           });
 
-          stats.imported++;
-          if (type === 'present') stats.present++;
-          else if (type === 'absence') stats.absence++;
-          else if (type === 'excuse') stats.excuse++;
-          else if (type === 'other') stats.other++;
-          else stats.missing++;
-        });
+          let lastValidDate: Date | null = globalDateFromTitle;
 
+          objects.forEach(o => {
+            const name = norm(getVal(o, [
+              'الإسم', 'الاسم', 'اسم الموظف', 'الموظف', 'اسم المعلم', 'المعلم', 
+              'اسم المستخدم', 'اسم المنسوب', 'المنسوب', 'المستخدم', 'الاسم الكامل', 
+              'اسم الموظف/المعلم', 'اسم المعلم/الموظف', 'Name', 'Employee Name'
+            ]));
+
+            if (!name || name === '-' || name.includes('الإجمالي') || name.includes('المجموع')) {
+              ignoredNoName++;
+              return;
+            }
+
+            const job = norm(getVal(o, [
+              'المسمى الوظيفي', 'المسمي الوظيفي', 'الوظيفة', 'الوظيفه', 'المسمى', 
+              'الصفة', 'الرتبة', 'المهنة', 'Job', 'Title', 'Position'
+            ])) || 'معلم / موظف';
+
+            const civil = norm(getVal(o, [
+              'السجل المدني', 'رقم الهوية', 'الهويه', 'الهوية', 'السجل', 
+              'رقم السجل المدني', 'الهوية الوطنية', 'الرقم الوظيفي', 'رقم الموظف', 'Civil ID', 'National ID', 'ID'
+            ]));
+
+            let rawDateVal = getVal(o, [
+              'التاريخ', 'اليوم والتاريخ', 'تاريخ التحضير', 'تاريخ الحضور', 
+              'تاريخ الحركة', 'تاريخ اليوم', 'تاريخ التسجيل', 'اليوم', 'التاريخ والوقت', 'Date',
+              'تاريخ البصمة', 'تاريخ الحضور والانصراف', 'تاريخ الحضور والإنصراف', 'التاريخ الميلادي', 'التاريخ الهجري', 'تاريخ المعاملة', 'تاريخ السجل'
+            ]);
+
+            let d = parseDate(rawDateVal);
+
+            // If row has no explicit date, inherit last valid date (for grouped/merged rows) or global title date
+            if (!d) {
+              d = lastValidDate;
+            } else {
+              lastValidDate = d;
+            }
+
+            if (!d) {
+              d = new Date();
+            }
+
+            const status = norm(getVal(o, [
+              'حالة التحضير', 'حاله التحضير', 'الحالة', 'الحاله', 'حالة الحضور', 
+              'حالة البصمة', 'نوع التحضير', 'البيان', 'الوضع', 'حالة السجل', 'Status'
+            ]));
+
+            const tin = parseTime(getVal(o, [
+              'توقيت الحضور', 'وقت الحضور', 'الحضور', 'الدخول', 'توقيت الدخول', 
+              'وقت الدخول', 'بصمة الدخول', 'أول بصمة', 'بصمة الحضور', 'حضور', 'دخول', 
+              'وقت الحضور الفعلي', 'Check In', 'Check-in', 'Time In', 'In'
+            ]));
+
+            const tout = parseTime(getVal(o, [
+              'توقيت الإنصراف', 'توقيت الانصراف', 'وقت الانصراف', 'وقت الإنصراف', 
+              'الانصراف', 'الإنصراف', 'الخروج', 'وقت الخروج', 'توقيت الخروج', 
+              'بصمة الخروج', 'آخر بصمة', 'بصمة الانصراف', 'انصراف', 'خروج', 
+              'وقت الانصراف الفعلي', 'Check Out', 'Check-out', 'Time Out', 'Out'
+            ]));
+
+            // Determine record type
+            const normalizedStatus = norm(status);
+            const hasIn = !!(tin && tin.total != null && tin.text !== '-');
+            const hasOut = !!(tout && tout.total != null && tout.text !== '-');
+            const hasBiometrics = hasIn || hasOut;
+
+            const isEmergency = isEmergencyLeave(status);
+            const forcePresentWords = ['مهمة', 'انتداب', 'تكليف', 'مهمة عمل'];
+            const forceExcuseWords = ['إجازة', 'اجازة', 'طبي', 'عذر', 'مرضي', 'مرافقة', 'وضع', 'أمومة', 'امومة', 'وفاة', 'استثنائية', 'اضطرارية', 'غياب بعذر'];
+            const weekendWords = ['عطلة', 'عطله', 'نهاية الاسبوع', 'نهاية الأسبوع', 'راحة أسبوعية', 'راحة اسبوعية', 'إجازة أسبوعية', 'اجازة اسبوعية'];
+
+            const isForcePresent = forcePresentWords.some(w => normalizedStatus.includes(w));
+            const isExcuse = forceExcuseWords.some(w => normalizedStatus.includes(w));
+            const isWeekendDay = isWeekend(d, config.weekend);
+            const isOfficialHoliday = isHoliday(d, config.holidays);
+
+            let type: ParsedRow['type'] = 'absence';
+            let finalStatus = status;
+
+            if (weekendWords.some(w => normalizedStatus.includes(w)) || isWeekendDay || isOfficialHoliday) {
+              type = 'other';
+              finalStatus = 'عطلة أسبوعية / رسمية';
+            } else if (isEmergency) {
+              type = hasBiometrics ? 'present' : 'excuse';
+              finalStatus = status || 'استئذان طارئ';
+            } else if (isForcePresent) {
+              type = 'present';
+              finalStatus = status || 'مهمة عمل';
+            } else if (isExcuse) {
+              type = 'excuse';
+              finalStatus = status || 'غياب بعذر';
+            } else if (hasBiometrics) {
+              type = 'present';
+              finalStatus = (status && !['غير مكتملة', 'غير مكتمله', 'انصراف تلقائي', 'بدون سجل بصمة', 'غائب', 'غياب'].includes(status)) ? status : 'حاضر';
+            } else {
+              type = 'absence';
+              finalStatus = (status && (status.includes('غياب') || status.includes('غائب'))) ? status : 'غياب بدون عذر';
+            }
+
+            let checkState = '';
+            let earlyMins = 0;
+            let lateMins = 0;
+
+            const approvedSunWed = config.checkoutSunWed || '12:30';
+            const approvedThu = config.checkoutThu || '11:45';
+
+            if (type === 'present' || isEmergency) {
+              checkState = checkoutState(finalStatus, tin, tout, config.autoCheckout, config.workHours, d, approvedSunWed, approvedThu);
+              earlyMins = earlyCheckoutMins(tin, tout, finalStatus, config.autoCheckout, config.workHours, d, approvedSunWed, approvedThu);
+              lateMins = minsAfterStart(tin, config.start);
+
+              if (isForcePresent && !hasBiometrics) {
+                checkState = '';
+                earlyMins = 0;
+                lateMins = 0;
+              }
+            }
+
+            parsedList.push({
+              name,
+              job,
+              civil,
+              date: d,
+              dateKey: dateKey(d),
+              month: monthKey(d),
+              status: finalStatus,
+              tin: hasIn ? tin : null,
+              tout: hasOut ? tout : null,
+              expected: expectedCheckout(tin, config.workHours, d, approvedSunWed, approvedThu),
+              checkout: checkState,
+              earlyMins,
+              type,
+              late: lateMins,
+            });
+
+            stats.imported++;
+            if (type === 'present') stats.present++;
+            else if (type === 'absence') stats.absence++;
+            else if (type === 'excuse') stats.excuse++;
+            else if (type === 'other') stats.other++;
+            else stats.missing++;
+          });
+        }
+
+        stats.totalRows = totalRawRowsCount;
         stats.noName = ignoredNoName;
         stats.noDate = ignoredNoDate;
         stats.ignored = ignoredNoName + ignoredNoDate;
@@ -1676,6 +1697,25 @@ export default function App() {
     customStartDate?: string, 
     customEndDate?: string
   ) => {
+    let effStart = (customStartDate || '').trim();
+    let effEnd = (customEndDate || '').trim();
+
+    // Auto-detect range if encoded in month string (e.g. from filterMonthlySummaries: "من 2026-08-01 إلى 2026-08-31")
+    if (!effStart && !effEnd && typeof month === 'string' && month.includes(' إلى ') && (month.startsWith('من ') || month.includes('الفترة من'))) {
+      const cleaned = month.replace('الفترة من', '').replace('من', '').trim();
+      const parts = cleaned.split(' إلى ');
+      if (parts.length === 2) {
+        const p1 = parts[0].trim();
+        const p2 = parts[1].trim();
+        if (p1 && p1 !== 'البداية') effStart = p1;
+        if (p2 && p2 !== 'النهاية') effEnd = p2;
+      }
+    }
+
+    const startKey = effStart ? dateKey(effStart) : '';
+    const endKey = effEnd ? dateKey(effEnd) : '';
+    const [minKey, maxKey] = (startKey && endKey && startKey > endKey) ? [endKey, startKey] : [startKey, endKey];
+
     const records = dailyRecords.filter(r => {
       // Exclude weekends, public holidays, and suspended dates
       if (isExcludedDay(r.date)) {
@@ -1683,10 +1723,10 @@ export default function App() {
       }
       const matchName = name === 'all' || r.name === name;
       let matchPeriod = true;
-      if (customStartDate || customEndDate) {
-        const dk = dateKey(r.date);
-        const matchStart = !customStartDate || dk >= customStartDate;
-        const matchEnd = !customEndDate || dk <= customEndDate;
+      if (minKey || maxKey) {
+        const dk = r.dateKey || dateKey(r.date);
+        const matchStart = !minKey || dk >= minKey;
+        const matchEnd = !maxKey || dk <= maxKey;
         matchPeriod = matchStart && matchEnd;
       } else {
         matchPeriod = month === 'all' || r.month === month;
@@ -1706,8 +1746,8 @@ export default function App() {
     const summary: EmployeeSummary = {
       name: name === 'all' ? 'جميع الموظفين' : name,
       job: '',
-      month: (customStartDate || customEndDate)
-        ? `الفترة من ${formatRangeDate(customStartDate) || 'البداية'} إلى ${formatRangeDate(customEndDate) || 'النهاية'}`
+      month: (minKey || maxKey)
+        ? `الفترة من ${formatRangeDate(minKey) || 'البداية'} إلى ${formatRangeDate(maxKey) || 'النهاية'}`
         : (month === 'all' ? 'كل الأشهر' : month),
       work: records.length,
       present: 0,
@@ -3419,7 +3459,9 @@ export default function App() {
   };
 
   const handlePrintEmployeeReport = (employeeName: string) => {
-    const rep = getIndividualReport(employeeName, selectedMonth);
+    const rep = selectedPeriodType === 'range'
+      ? getIndividualReport(employeeName, 'all', selectedStartDate, selectedEndDate)
+      : getIndividualReport(employeeName, selectedMonth);
     const m = rep.summary;
 
     const printWindow = window.open('', '_blank', 'width=1000,height=800');
@@ -3627,7 +3669,9 @@ export default function App() {
   };
 
   const handleExportEmployeeWord = (employeeName: string) => {
-    const rep = getIndividualReport(employeeName, selectedMonth);
+    const rep = selectedPeriodType === 'range'
+      ? getIndividualReport(employeeName, 'all', selectedStartDate, selectedEndDate)
+      : getIndividualReport(employeeName, selectedMonth);
     const m = rep.summary;
 
     const wordHtml = `
@@ -3842,7 +3886,20 @@ export default function App() {
             </button>
 
             <button
-              onClick={() => setCurrentTab('monthly')}
+              onClick={() => {
+                if (selectedEmployee && selectedEmployee !== 'all') {
+                  setMonthlyEmployee(selectedEmployee);
+                }
+                if (selectedPeriodType === 'range') {
+                  setMonthlyPeriodType('range');
+                  if (selectedStartDate) setMonthlyStartDate(selectedStartDate);
+                  if (selectedEndDate) setMonthlyEndDate(selectedEndDate);
+                } else {
+                  setMonthlyPeriodType('month');
+                  setMonthlyMonth(selectedMonth || 'all');
+                }
+                setCurrentTab('monthly');
+              }}
               className={`w-full flex items-center justify-between p-3.5 rounded-xl text-right font-bold transition-all border border-white/5 ${
                 currentTab === 'monthly'
                   ? 'bg-white text-teal-950 shadow-md'
@@ -4639,7 +4696,16 @@ export default function App() {
                               key={`${m.name}-${m.month}`}
                               onClick={() => {
                                 setMonthlyEmployee(m.name);
-                                setMonthlyMonth(m.month);
+                                setSelectedEmployee(m.name);
+                                if (selectedPeriodType === 'range') {
+                                  setMonthlyPeriodType('range');
+                                  setMonthlyStartDate(selectedStartDate);
+                                  setMonthlyEndDate(selectedEndDate);
+                                  setMonthlyMonth('all');
+                                } else {
+                                  setMonthlyPeriodType('month');
+                                  setMonthlyMonth(m.month);
+                                }
                                 setCurrentTab('monthly');
                               }}
                               className="border-b border-slate-100 hover:bg-slate-50 transition-all cursor-pointer"
@@ -5508,13 +5574,35 @@ export default function App() {
                 <div className="space-y-6">
                   {/* COMPREHENSIVE SELECTION CONTROLS */}
                   <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm">
-                    <h3 className="text-base font-extrabold text-teal-950 mb-3">توليد تقرير الموظف المتكامل والدوري</h3>
+                    <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+                      <h3 className="text-base font-extrabold text-teal-950">توليد تقرير الموظف المتكامل والدوري</h3>
+                      {dailyRecords.length > 0 && (() => {
+                        const validTimes = dailyRecords.map(r => r.date.getTime()).filter(t => !isNaN(t));
+                        if (validTimes.length === 0) return null;
+                        const minD = new Date(Math.min(...validTimes));
+                        const maxD = new Date(Math.max(...validTimes));
+                        const arMonthsNames = ['يناير', 'فبراير', 'مارس', 'أبريل', 'مايو', 'يونيو', 'يوليو', 'أغسطس', 'سبتمبر', 'أكتوبر', 'نوفمبر', 'ديسمبر'];
+                        return (
+                          <div className="text-xs bg-teal-50 border border-teal-200 text-teal-900 px-3 py-1 rounded-xl font-bold flex items-center gap-1.5 shadow-2xs">
+                            <span className="w-2 h-2 rounded-full bg-teal-600 animate-pulse"></span>
+                            <span>التواريخ المتاحة في قاعدة البيانات:</span>
+                            <span className="text-teal-950 font-extrabold underline decoration-dotted">
+                              من {minD.getDate()} {arMonthsNames[minD.getMonth()]} {minD.getFullYear()}م إلى {maxD.getDate()} {arMonthsNames[maxD.getMonth()]} {maxD.getFullYear()}م
+                            </span>
+                          </div>
+                        );
+                      })()}
+                    </div>
                     <div className="flex flex-wrap items-end gap-4">
                       <div className="w-full md:w-72">
                         <label className="block text-xs font-bold text-slate-500 mb-1.5">اختر الموظف المستهدف</label>
                         <select
                           value={monthlyEmployee}
-                          onChange={(e) => setMonthlyEmployee(e.target.value)}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            setMonthlyEmployee(val);
+                            setSelectedEmployee(val);
+                          }}
                           className="bg-slate-50 border border-slate-200 rounded-xl px-3 py-2.5 text-sm font-bold text-slate-700 w-full outline-none focus:border-teal-500"
                         >
                           <option value="all">📊 تقرير شامل لجميع المعلمين والموظفين</option>
@@ -5528,7 +5616,11 @@ export default function App() {
                         <label className="block text-xs font-bold text-slate-500 mb-1.5">تصفية الفترة حسب</label>
                         <select
                           value={monthlyPeriodType}
-                          onChange={(e) => setMonthlyPeriodType(e.target.value as 'month' | 'range')}
+                          onChange={(e) => {
+                            const val = e.target.value as 'month' | 'range';
+                            setMonthlyPeriodType(val);
+                            setSelectedPeriodType(val);
+                          }}
                           className="bg-slate-50 border border-slate-200 rounded-xl px-3 py-2.5 text-sm font-bold text-slate-700 w-full outline-none focus:border-teal-500"
                         >
                           <option value="month">📅 الشهر</option>
@@ -5541,7 +5633,11 @@ export default function App() {
                           <label className="block text-xs font-bold text-slate-500 mb-1.5">اختر الشهر</label>
                           <select
                             value={monthlyMonth}
-                            onChange={(e) => setMonthlyMonth(e.target.value)}
+                            onChange={(e) => {
+                              const val = e.target.value;
+                              setMonthlyMonth(val);
+                              setSelectedMonth(val);
+                            }}
                             className="bg-slate-50 border border-slate-200 rounded-xl px-3 py-2.5 text-sm font-bold text-slate-700 w-full outline-none focus:border-teal-500"
                           >
                             <option value="all">كل الأشهر المسجلة</option>
@@ -5557,7 +5653,11 @@ export default function App() {
                             <input
                               type="date"
                               value={monthlyStartDate}
-                              onChange={(e) => setMonthlyStartDate(e.target.value)}
+                              onChange={(e) => {
+                                const val = e.target.value;
+                                setMonthlyStartDate(val);
+                                setSelectedStartDate(val);
+                              }}
                               className="bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-sm font-bold text-slate-700 w-full outline-none focus:border-teal-500 h-[42px]"
                             />
                           </div>
@@ -5566,7 +5666,11 @@ export default function App() {
                             <input
                               type="date"
                               value={monthlyEndDate}
-                              onChange={(e) => setMonthlyEndDate(e.target.value)}
+                              onChange={(e) => {
+                                const val = e.target.value;
+                                setMonthlyEndDate(val);
+                                setSelectedEndDate(val);
+                              }}
                               className="bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-sm font-bold text-slate-700 w-full outline-none focus:border-teal-500 h-[42px]"
                             />
                           </div>
@@ -5780,10 +5884,11 @@ export default function App() {
                         else if (filterName === 'emergency_with_exit') matched = rep.details.filter(r => r.checkout === 'استئذان طارئ موثق (بصمة)');
                         
                         if (matched.length === 0) return '';
+                        const arMonthNamesList = ['يناير', 'فبراير', 'مارس', 'أبريل', 'مايو', 'يونيو', 'يوليو', 'أغسطس', 'سبتمبر', 'أكتوبر', 'نوفمبر', 'ديسمبر'];
                         return matched.map(r => {
                           const d = r.date;
-                          const p = (n: number) => String(n).padStart(2, '0');
-                          return `${p(d.getDate())}-${p(d.getMonth() + 1)}`;
+                          const mName = arMonthNamesList[d.getMonth()] || `${d.getMonth() + 1}`;
+                          return `${d.getDate()} ${mName}`;
                         }).join(' ، ');
                       };
 
@@ -6102,7 +6207,23 @@ export default function App() {
                                       return (
                                         <tr>
                                           <td colSpan={8} className="p-8 text-center text-slate-400 font-bold">
-                                            لا توجد سجلات مطابقة لهذه التصفية في هذا الشهر.
+                                            <div className="flex flex-col items-center justify-center gap-2">
+                                              <span>
+                                                {detailCardFilter
+                                                  ? 'لا توجد سجلات مطابقة لتصفية البطاقة المحددة في هذه الفترة.'
+                                                  : (monthlyPeriodType === 'range'
+                                                      ? 'لا توجد سجلات مسجلة لهذا الموظف في نطاق التواريخ المحددة.'
+                                                      : 'لا توجد سجلات مسجلة لهذا الموظف في هذا الشهر.')}
+                                              </span>
+                                              {detailCardFilter && (
+                                                <button
+                                                  onClick={() => setDetailCardFilter(null)}
+                                                  className="text-xs bg-teal-50 text-teal-700 hover:bg-teal-100 px-3 py-1.5 rounded-lg font-bold border border-teal-200 transition-all cursor-pointer inline-flex items-center gap-1"
+                                                >
+                                                  <span>عرض جميع سجلات الفترة (إلغاء تصفية البطاقة)</span>
+                                                </button>
+                                              )}
+                                            </div>
                                           </td>
                                         </tr>
                                       );
