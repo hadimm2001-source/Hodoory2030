@@ -2114,12 +2114,12 @@ export default function App() {
 
           <div class="signature-box">
             <div class="sig-col">
-              <b>وكيل المدرسة لشؤون الطلاب والمنسوبين</b><br><br><br>
-              التوقيع: .......................................
+              <b>المعلم / الموظف: ............................................</b><br><br><br>
+              التوقيع: ............................................
             </div>
             <div class="sig-col">
-              <b>مدير مدرسة الجشة المتوسطة</b><br><br><br>
-              التوقيع: .......................................
+              <b>مدير المدرسة: ............................................</b><br><br><br>
+              التوقيع: ............................................
             </div>
           </div>
 
@@ -2360,7 +2360,16 @@ export default function App() {
           </tbody>
         </table>
 
-
+        <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-top: 45px; font-weight:bold; font-size:13px;">
+          <div style="text-align: right; min-width: 260px;">
+            <div>المعلم / الموظف: ${m.name}</div>
+            <div style="margin-top: 18px;">التوقيع: ............................................</div>
+          </div>
+          <div style="text-align: left; min-width: 260px;">
+            <div>مدير المدرسة: ............................................</div>
+            <div style="margin-top: 18px;">التوقيع: ............................................</div>
+          </div>
+        </div>
 
         <script>
           window.onload = function() {
@@ -2472,6 +2481,21 @@ export default function App() {
               `).join('')}
             </tbody>
           </table>
+
+          <div style="margin-top: 40px; font-size: 13px; font-weight: bold;">
+            <table style="width: 100%; border: none;">
+              <tr>
+                <td style="border: none; text-align: right; width: 50%;">
+                  المعلم / الموظف: ............................................<br><br>
+                  التوقيع: ............................................
+                </td>
+                <td style="border: none; text-align: left; width: 50%;">
+                  مدير المدرسة: ............................................<br><br>
+                  التوقيع: ............................................
+                </td>
+              </tr>
+            </table>
+          </div>
         </body>
         </html>
       `;
@@ -2555,6 +2579,21 @@ export default function App() {
             `).join('')}
           </tbody>
         </table>
+
+        <div style="margin-top: 40px; font-size: 13px; font-weight: bold;">
+          <table style="width: 100%; border: none;">
+            <tr>
+              <td style="border: none; text-align: right; width: 50%;">
+                المعلم / الموظف: ${m.name}<br><br>
+                التوقيع: ............................................
+              </td>
+              <td style="border: none; text-align: left; width: 50%;">
+                مدير المدرسة: ............................................<br><br>
+                التوقيع: ............................................
+              </td>
+            </tr>
+          </table>
+        </div>
       </body>
       </html>
     `;
@@ -2678,6 +2717,17 @@ export default function App() {
           </tbody>
         </table>
 
+        <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-top: 45px; font-weight:bold; font-size:13px;">
+          <div style="text-align: right; min-width: 260px;">
+            <div>المعلم / الموظف: ${selectedEmployee !== 'all' ? selectedEmployee : (Array.from(new Set(list.map(r => r.name))).length === 1 ? Array.from(new Set(list.map(r => r.name)))[0] : '...........................................')}</div>
+            <div style="margin-top: 18px;">التوقيع: ............................................</div>
+          </div>
+          <div style="text-align: left; min-width: 260px;">
+            <div>مدير المدرسة: ............................................</div>
+            <div style="margin-top: 18px;">التوقيع: ............................................</div>
+          </div>
+        </div>
+
         <script>
           window.onload = function() {
             window.focus();
@@ -2697,6 +2747,11 @@ export default function App() {
     const list = filterDailyRecords(dailyRecords)
       .filter(r => r.type === 'present')
       .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+    const targetTeacher = selectedEmployee !== 'all' 
+      ? selectedEmployee 
+      : (Array.from(new Set(list.map(r => r.name))).length === 1 
+          ? Array.from(new Set(list.map(r => r.name)))[0] 
+          : '');
     const wordHtml = `
       <html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'>
       <head>
@@ -2749,6 +2804,21 @@ export default function App() {
             `).join('')}
           </tbody>
         </table>
+
+        <div style="margin-top: 40px; font-size: 13px; font-weight: bold;">
+          <table style="width: 100%; border: none;">
+            <tr>
+              <td style="border: none; text-align: right; width: 50%;">
+                المعلم / الموظف: ${targetTeacher || '...........................................'}<br><br>
+                التوقيع: ............................................
+              </td>
+              <td style="border: none; text-align: left; width: 50%;">
+                مدير المدرسة: ............................................<br><br>
+                التوقيع: ............................................
+              </td>
+            </tr>
+          </table>
+        </div>
       </body>
       </html>
     `;
@@ -2911,9 +2981,15 @@ export default function App() {
           </tbody>
         </table>
 
-        <div style="display:flex; justify-content:space-between; margin-top: 40px; font-weight:bold; font-size:13px;">
-          <div>الموجه الطلابي: عبدالهادي بن محمد المحسن</div>
-          <div>مدير المدرسة: .......................................</div>
+        <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-top: 45px; font-weight:bold; font-size:13px;">
+          <div style="text-align: right; min-width: 260px;">
+            <div>المعلم / الموظف: ${selectedEmployee !== 'all' ? selectedEmployee : (Array.from(new Set(list.map(r => r.name))).length === 1 ? Array.from(new Set(list.map(r => r.name)))[0] : '...........................................')}</div>
+            <div style="margin-top: 18px;">التوقيع: ............................................</div>
+          </div>
+          <div style="text-align: left; min-width: 260px;">
+            <div>مدير المدرسة: ............................................</div>
+            <div style="margin-top: 18px;">التوقيع: ............................................</div>
+          </div>
         </div>
 
         <script>
@@ -2936,6 +3012,11 @@ export default function App() {
       .filter(r => r.late > 0)
       .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
     const totalLateMins = list.reduce((acc, r) => acc + r.late, 0);
+    const targetTeacher = selectedEmployee !== 'all' 
+      ? selectedEmployee 
+      : (Array.from(new Set(list.map(r => r.name))).length === 1 
+          ? Array.from(new Set(list.map(r => r.name)))[0] 
+          : '');
     const wordHtml = `
       <html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'>
       <head>
@@ -2984,6 +3065,21 @@ export default function App() {
             `).join('')}
           </tbody>
         </table>
+
+        <div style="margin-top: 40px; font-size: 13px; font-weight: bold;">
+          <table style="width: 100%; border: none;">
+            <tr>
+              <td style="border: none; text-align: right; width: 50%;">
+                المعلم / الموظف: ${targetTeacher || '...........................................'}<br><br>
+                التوقيع: ............................................
+              </td>
+              <td style="border: none; text-align: left; width: 50%;">
+                مدير المدرسة: ............................................<br><br>
+                التوقيع: ............................................
+              </td>
+            </tr>
+          </table>
+        </div>
       </body>
       </html>
     `;
@@ -3145,9 +3241,15 @@ export default function App() {
           </tbody>
         </table>
 
-        <div style="display:flex; justify-content:space-between; margin-top: 40px; font-weight:bold; font-size:13px;">
-          <div>الموجه الطلابي: عبدالهادي بن محمد المحسن</div>
-          <div>مدير المدرسة: .......................................</div>
+        <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-top: 45px; font-weight:bold; font-size:13px;">
+          <div style="text-align: right; min-width: 260px;">
+            <div>المعلم / الموظف: ${selectedEmployee !== 'all' ? selectedEmployee : (absentTeachers.length === 1 ? absentTeachers[0] : '...........................................')}</div>
+            <div style="margin-top: 18px;">التوقيع: ............................................</div>
+          </div>
+          <div style="text-align: left; min-width: 260px;">
+            <div>مدير المدرسة: ............................................</div>
+            <div style="margin-top: 18px;">التوقيع: ............................................</div>
+          </div>
         </div>
 
         <script>
@@ -3169,6 +3271,10 @@ export default function App() {
     const list = filterDailyRecords(dailyRecords)
       .filter(r => r.type === 'absence')
       .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+    const absentTeachers = Array.from(new Set(list.map(r => r.name)));
+    const targetTeacher = selectedEmployee !== 'all' 
+      ? selectedEmployee 
+      : (absentTeachers.length === 1 ? absentTeachers[0] : '');
     const wordHtml = `
       <html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'>
       <head>
@@ -3217,6 +3323,21 @@ export default function App() {
             `).join('')}
           </tbody>
         </table>
+
+        <div style="margin-top: 40px; font-size: 13px; font-weight: bold;">
+          <table style="width: 100%; border: none;">
+            <tr>
+              <td style="border: none; text-align: right; width: 50%;">
+                المعلم / الموظف: ${targetTeacher || '...........................................'}<br><br>
+                التوقيع: ............................................
+              </td>
+              <td style="border: none; text-align: left; width: 50%;">
+                مدير المدرسة: ............................................<br><br>
+                التوقيع: ............................................
+              </td>
+            </tr>
+          </table>
+        </div>
       </body>
       </html>
     `;
@@ -3373,9 +3494,15 @@ export default function App() {
           </tbody>
         </table>
 
-        <div style="display:flex; justify-content:space-between; margin-top: 40px; font-weight:bold; font-size:13px;">
-          <div>الموجه الطلابي: عبدالهادي بن محمد المحسن</div>
-          <div>مدير المدرسة: .......................................</div>
+        <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-top: 45px; font-weight:bold; font-size:13px;">
+          <div style="text-align: right; min-width: 260px;">
+            <div>المعلم / الموظف: ${selectedEmployee !== 'all' ? selectedEmployee : (Array.from(new Set(list.map(r => r.name))).length === 1 ? Array.from(new Set(list.map(r => r.name)))[0] : '...........................................')}</div>
+            <div style="margin-top: 18px;">التوقيع: ............................................</div>
+          </div>
+          <div style="text-align: left; min-width: 260px;">
+            <div>مدير المدرسة: ............................................</div>
+            <div style="margin-top: 18px;">التوقيع: ............................................</div>
+          </div>
         </div>
 
         <script>
@@ -3397,6 +3524,11 @@ export default function App() {
     const list = filterDailyRecords(dailyRecords)
       .filter(r => r.type === 'excuse')
       .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+    const targetTeacher = selectedEmployee !== 'all' 
+      ? selectedEmployee 
+      : (Array.from(new Set(list.map(r => r.name))).length === 1 
+          ? Array.from(new Set(list.map(r => r.name)))[0] 
+          : '');
     const wordHtml = `
       <html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'>
       <head>
@@ -3445,6 +3577,21 @@ export default function App() {
             `).join('')}
           </tbody>
         </table>
+
+        <div style="margin-top: 40px; font-size: 13px; font-weight: bold;">
+          <table style="width: 100%; border: none;">
+            <tr>
+              <td style="border: none; text-align: right; width: 50%;">
+                المعلم / الموظف: ${targetTeacher || '...........................................'}<br><br>
+                التوقيع: ............................................
+              </td>
+              <td style="border: none; text-align: left; width: 50%;">
+                مدير المدرسة: ............................................<br><br>
+                التوقيع: ............................................
+              </td>
+            </tr>
+          </table>
+        </div>
       </body>
       </html>
     `;
@@ -3653,6 +3800,17 @@ export default function App() {
           </tbody>
         </table>
 
+        <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-top: 45px; font-weight:bold; font-size:13px;">
+          <div style="text-align: right; min-width: 260px;">
+            <div>المعلم / الموظف: ${m.name}</div>
+            <div style="margin-top: 18px;">التوقيع: ............................................</div>
+          </div>
+          <div style="text-align: left; min-width: 260px;">
+            <div>مدير المدرسة: ............................................</div>
+            <div style="margin-top: 18px;">التوقيع: ............................................</div>
+          </div>
+        </div>
+
         <script>
           window.onload = function() {
             window.focus();
@@ -3738,6 +3896,21 @@ export default function App() {
             `).join('')}
           </tbody>
         </table>
+
+        <div style="margin-top: 40px; font-size: 13px; font-weight: bold;">
+          <table style="width: 100%; border: none;">
+            <tr>
+              <td style="border: none; text-align: right; width: 50%;">
+                المعلم / الموظف: ${m.name}<br><br>
+                التوقيع: ............................................
+              </td>
+              <td style="border: none; text-align: left; width: 50%;">
+                مدير المدرسة: ............................................<br><br>
+                التوقيع: ............................................
+              </td>
+            </tr>
+          </table>
+        </div>
       </body>
       </html>
     `;
