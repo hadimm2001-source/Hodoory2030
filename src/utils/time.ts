@@ -342,21 +342,39 @@ export function expectedCheckout(
 }
 
 export function isAbnormalMorningCheckout(
-  tin: TimeObj | null,
-  tout: TimeObj | null
+  arg1: TimeObj | null,
+  arg2: TimeObj | null
 ): boolean {
+  if (!arg1 && !arg2) return false;
+
+  // Auto-detect if parameters were passed in reverse order (tout, tin)
+  let tin = arg1;
+  let tout = arg2;
+  if (arg1 && arg2 && arg1.total != null && arg2.total != null) {
+    if (arg1.total >= 10.5 * 60 && arg2.total < 10.5 * 60) {
+      tout = arg1;
+      tin = arg2;
+    }
+  }
+
   if (!tout || tout.total == null || tout.text === '-') return false;
-  // If checkout is recorded in the early morning before 10:00 AM (e.g. 06:46, 07:15, 08:30)
-  // or within 45 minutes of check-in in the morning before 10:30 AM:
-  // This cannot be a genuine dismissal punch for school. It signifies that the teacher
-  // either punched twice in the morning or the biometric reader carried over yesterday's
-  // missing departure onto today's morning punch (خلل تسجيل انصراف في اليوم التالي / لم يسجل انصراف في موعده).
+
+  // A checkout at 10:30 AM or later (e.g. 11:30, 12:09, 12:30) is an afternoon departure
+  // on the SAME DAY and is NEVER a next-day morning punch!
+  if (tout.total >= 10.5 * 60) {
+    return false;
+  }
+
+  // Check if checkout is in the early morning before 10:00 AM:
+  // e.g. next morning punch before check-in or abnormal morning punch
+  if (tin && tin.total != null && tout.total <= tin.total && tout.total < 10 * 60) {
+    return true;
+  }
+
   if (tout.total < 10 * 60) {
     return true;
   }
-  if (tin && tin.total != null && tout.total < 10.5 * 60 && (tout.total - tin.total) <= 45) {
-    return true;
-  }
+
   return false;
 }
 
@@ -370,8 +388,69 @@ export function isEmergencyLeave(s: any): boolean {
   return (
     k.includes('استئذان') ||
     k.includes('استئيذان') ||
-    (k.includes('اذن') && (k.includes('طارئ') || k.includes('خروج') || k.includes('عمل')))
+    k.includes('استيئذان') ||
+    k.includes('استيذان') ||
+    k.includes('اذن') ||
+    k.includes('إذن') ||
+    k.includes('معفي') ||
+    k.includes('معفى') ||
+    (k.includes('خروج') && (k.includes('طارئ') || k.includes('عذر') || k.includes('عمل') || k.includes('رسمي') || k.includes('اذن')))
   );
+}
+
+export function isAccountableEarlyCheckoutRecord(
+  r: {
+    checkout?: string;
+    earlyMins?: number;
+    status?: string;
+    tin?: TimeObj | null;
+    tout?: TimeObj | null;
+    name?: string;
+    dateKey?: string;
+  },
+  faresSubmittedMap?: Record<string, boolean>
+): boolean {
+  const key = `${r.name || ''}|${r.dateKey || ''}`;
+  const isExcused = isEmergencyLeave(r.status) ||
+    !!(faresSubmittedMap && faresSubmittedMap[key]) ||
+    r.checkout === 'استئذان طارئ موثق (بصمة)' ||
+    (r.status && (normKey(r.status).includes('استئذان') || normKey(r.status).includes('معفى')));
+
+  // If the employee has an approved permission / excuse, they are EXEMPT:
+  if (isExcused) {
+    return false;
+  }
+
+  // 1. Left before end of day without permission
+  if (r.checkout === 'خروج قبل نهاية الدوام' || r.checkout === 'انصراف مبكر' || (r.earlyMins || 0) > 0) {
+    return true;
+  }
+
+  // 2. Punched checkout the next morning before morning check-in
+  if (
+    r.checkout === 'انصراف في غير وقت الفعلي' ||
+    (r.tout && r.tout.total != null && isAbnormalMorningCheckout(r.tin || null, r.tout))
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+export function isExcusedEarlyCheckoutRecord(
+  r: {
+    checkout?: string;
+    earlyMins?: number;
+    status?: string;
+    name?: string;
+    dateKey?: string;
+  },
+  faresSubmittedMap?: Record<string, boolean>
+): boolean {
+  const key = `${r.name || ''}|${r.dateKey || ''}`;
+  return isEmergencyLeave(r.status) ||
+    !!(faresSubmittedMap && faresSubmittedMap[key]) ||
+    r.checkout === 'استئذان طارئ موثق (بصمة)';
 }
 
 export function checkoutState(

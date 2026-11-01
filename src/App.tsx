@@ -24,7 +24,8 @@ import {
   MessageSquare,
   AlertTriangle,
   Edit,
-  FileSpreadsheet
+  FileSpreadsheet,
+  LogOut
 } from 'lucide-react';
 
 import {
@@ -66,6 +67,9 @@ import {
   checkoutState,
   earlyCheckoutMins,
   isEmergencyLeave,
+  isAbnormalMorningCheckout,
+  isAccountableEarlyCheckoutRecord,
+  isExcusedEarlyCheckoutRecord,
   isWeekend,
   isHoliday,
   holidaySet,
@@ -198,6 +202,7 @@ export default function App() {
   const [selectedStatus, setSelectedStatus] = useState<string>('all');
   const [searchTerm, setSearchTerm] = useState<string>('');
   const [excuseSubFilter, setExcuseSubFilter] = useState<'all' | 'leaves' | 'emergency_all' | 'emergency_no_exit' | 'emergency_with_exit'>('all');
+  const [earlyFilterType, setEarlyFilterType] = useState<'accountable' | 'early_only' | 'wrong_time' | 'exempt' | 'all'>('accountable');
 
   // Monthly Report interactive selections
   const [monthlyEmployee, setMonthlyEmployee] = useState<string>('all');
@@ -1228,8 +1233,20 @@ export default function App() {
         normKey(r.civil || '').includes(normKey(searchTerm));
 
       let matchStatus = true;
-      if (selectedStatus === 'early') {
-        matchStatus = r.checkout === 'خروج قبل نهاية الدوام' || r.checkout === 'انصراف مبكر' || r.earlyMins > 0;
+      const isExcused = isEmergencyLeave(r.status) || !!faresSubmitted[`${r.name}|${r.dateKey}`] || r.checkout === 'استئذان طارئ موثق (بصمة)';
+      const isEarlyUnexcused = (r.checkout === 'خروج قبل نهاية الدوام' || r.checkout === 'انصراف مبكر' || (r.earlyMins || 0) > 0) && !isExcused;
+      const isNextDayPunch = r.checkout === 'انصراف في غير وقت الفعلي' || (r.tout && r.tout.total != null && isAbnormalMorningCheckout(r.tin, r.tout));
+
+      if (selectedStatus === 'early' || selectedStatus === 'early_accountable') {
+        // المحاسبة: من خرج قبل نهاية الدوام دون استئذان، أو من قام بعمل بصمة الخروج في اليوم التالي قبل بصمة الدخول
+        matchStatus = isEarlyUnexcused || isNextDayPunch;
+      } else if (selectedStatus === 'early_no_excuse') {
+        matchStatus = isEarlyUnexcused;
+      } else if (selectedStatus === 'early_exempt') {
+        // المعفيين: من لديهم استئذان معتمد
+        matchStatus = isExcused && (r.checkout === 'استئذان طارئ موثق (بصمة)' || r.checkout === 'خروج قبل نهاية الدوام' || r.checkout === 'انصراف مبكر' || (r.earlyMins || 0) > 0);
+      } else if (selectedStatus === 'wrong_time') {
+        matchStatus = isNextDayPunch;
       } else if (selectedStatus === 'late') {
         matchStatus = r.late > 0;
       } else if (selectedStatus === 'absence') {
@@ -1242,8 +1259,6 @@ export default function App() {
         matchStatus = r.checkout === 'استئذان بدون بصمة انصراف' || (isEmergencyLeave(r.status) && (!r.tout || r.tout.total == null || r.tout.text === '-'));
       } else if (selectedStatus === 'emergency_with_exit') {
         matchStatus = r.checkout === 'استئذان طارئ موثق (بصمة)' || (isEmergencyLeave(r.status) && !!(r.tout && r.tout.total != null && r.tout.text !== '-'));
-      } else if (selectedStatus === 'wrong_time') {
-        matchStatus = r.checkout === 'انصراف في غير وقت الفعلي';
       }
 
       return matchMonth && matchEmployee && matchSearch && matchStatus;
@@ -1363,8 +1378,14 @@ export default function App() {
 
       return rangeSummaries.filter(s => {
         let matchStatus = true;
-        if (selectedStatus === 'early') {
-          matchStatus = s.earlyCount > 0;
+        if (selectedStatus === 'early' || selectedStatus === 'early_accountable') {
+          matchStatus = (s.earlyCount || 0) > 0 || (s.wrongTimeExitsCount || 0) > 0;
+        } else if (selectedStatus === 'early_no_excuse') {
+          matchStatus = (s.earlyCount || 0) > 0;
+        } else if (selectedStatus === 'wrong_time') {
+          matchStatus = (s.wrongTimeExitsCount || 0) > 0;
+        } else if (selectedStatus === 'early_exempt') {
+          matchStatus = (s.emergencyWithExitCount || 0) > 0;
         } else if (selectedStatus === 'late') {
           matchStatus = s.lateCount > 0;
         } else if (selectedStatus === 'absence') {
@@ -1390,8 +1411,14 @@ export default function App() {
         normKey(s.job).includes(normKey(searchTerm));
 
       let matchStatus = true;
-      if (selectedStatus === 'early') {
-        matchStatus = s.earlyCount > 0;
+      if (selectedStatus === 'early' || selectedStatus === 'early_accountable') {
+        matchStatus = (s.earlyCount || 0) > 0 || (s.wrongTimeExitsCount || 0) > 0;
+      } else if (selectedStatus === 'early_no_excuse') {
+        matchStatus = (s.earlyCount || 0) > 0;
+      } else if (selectedStatus === 'wrong_time') {
+        matchStatus = (s.wrongTimeExitsCount || 0) > 0;
+      } else if (selectedStatus === 'early_exempt') {
+        matchStatus = (s.emergencyWithExitCount || 0) > 0;
       } else if (selectedStatus === 'late') {
         matchStatus = s.lateCount > 0;
       } else if (selectedStatus === 'absence') {
@@ -1441,7 +1468,7 @@ export default function App() {
     }
 
     if (r.type === 'absence') {
-      return `السلام عليكم ورحمة الله وبركاته\n\nالأستاذ الموقر: ${r.name}\n\nيرجى التكرم بتقديم مبرر الغياب المعتمد ليوم ${dName} الموافق ${dStr} في نظام فارس وتقديمه للموجه الطلابي لاعتماده.\n\nشاكرين لكم تعاونكم وحرصكم المستمر.`;
+      return `السلام عليكم ورحمة الله وبركاته\n\nالأستاذ الموقر: ${r.name}\n\nيرجى التكرم بتقديم مبرر الغياب المعتمد ليوم ${dName} الموافق ${dStr} في نظام فارس وتقديمه لإدارة المدرسة لاعتماده.\n\nشاكرين لكم تعاونكم وحرصكم المستمر.`;
     }
 
     if (r.late > 0) {
@@ -1610,6 +1637,8 @@ export default function App() {
     const totalMissingCheckout = aggregatedSummaries.reduce((sum, m) => sum + (m.missingCheckoutCount || 0), 0);
     const totalEmergencyNoExit = aggregatedSummaries.reduce((sum, m) => sum + (m.emergencyNoExitCount || 0), 0);
     const totalEmergencyWithExit = aggregatedSummaries.reduce((sum, m) => sum + (m.emergencyWithExitCount || 0), 0);
+    const totalWrongTimeExits = aggregatedSummaries.reduce((sum, m) => sum + (m.wrongTimeExitsCount || 0), 0);
+    const totalAccountableEarly = totalEarlyCount + totalWrongTimeExits;
 
     return {
       totalCount,
@@ -1628,6 +1657,8 @@ export default function App() {
       totalMissingCheckout,
       totalEmergencyNoExit,
       totalEmergencyWithExit,
+      totalWrongTimeExits,
+      totalAccountableEarly,
     };
   };
 
@@ -3093,6 +3124,317 @@ export default function App() {
     URL.revokeObjectURL(url);
   };
 
+  const handlePrintEarlyList = () => {
+    const list = filterDailyRecords(dailyRecords).filter(r => {
+      if (earlyFilterType === 'early_only') {
+        const isExcused = isEmergencyLeave(r.status) || !!faresSubmitted[`${r.name}|${r.dateKey}`] || r.checkout === 'استئذان طارئ موثق (بصمة)';
+        return (r.checkout === 'خروج قبل نهاية الدوام' || r.checkout === 'انصراف مبكر' || (r.earlyMins || 0) > 0) && !isExcused;
+      }
+      if (earlyFilterType === 'wrong_time') {
+        return r.checkout === 'انصراف في غير وقت الفعلي' || (r.tout && r.tout.total != null && isAbnormalMorningCheckout(r.tin, r.tout));
+      }
+      if (earlyFilterType === 'exempt') {
+        const isExcused = isEmergencyLeave(r.status) || !!faresSubmitted[`${r.name}|${r.dateKey}`] || r.checkout === 'استئذان طارئ موثق (بصمة)';
+        return isExcused && (r.checkout === 'استئذان طارئ موثق (بصمة)' || r.checkout === 'خروج قبل نهاية الدوام' || (r.earlyMins || 0) > 0);
+      }
+      if (earlyFilterType === 'all') {
+        const isExcused = isEmergencyLeave(r.status) || !!faresSubmitted[`${r.name}|${r.dateKey}`] || r.checkout === 'استئذان طارئ موثق (بصمة)';
+        const isEarly = r.checkout === 'خروج قبل نهاية الدوام' || r.checkout === 'انصراف مبكر' || (r.earlyMins || 0) > 0;
+        const isNextDay = r.checkout === 'انصراف في غير وقت الفعلي' || (r.tout && r.tout.total != null && isAbnormalMorningCheckout(r.tin, r.tout));
+        return isEarly || isNextDay || isExcused;
+      }
+      return isAccountableEarlyCheckoutRecord(r, faresSubmitted);
+    }).sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+
+    const totalEarlyCount = list.length;
+    const targetTeacher = selectedEmployee !== 'all' 
+      ? selectedEmployee 
+      : (Array.from(new Set(list.map(r => r.name))).length === 1 
+          ? Array.from(new Set(list.map(r => r.name)))[0] 
+          : '');
+
+    const printWindow = window.open('', '_blank', 'width=1000,height=800');
+    if (!printWindow) {
+      alert('الرجاء السماح بالنوافذ المنبثقة للطباعة.');
+      return;
+    }
+
+    const printHtml = `
+      <!doctype html>
+      <html lang="ar" dir="rtl">
+      <head>
+        <meta charset="utf-8">
+        <title>كشف رصد الخروج قبل نهاية الدوام - مدرسة الجشة المتوسطة</title>
+        <style>
+          @import url('https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800&display=swap');
+          body {
+            font-family: 'Tajawal', sans-serif;
+            color: #1e293b;
+            margin: 40px;
+            direction: rtl;
+            text-align: right;
+            line-height: 1.6;
+          }
+          .report-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 3px solid #e11d48;
+            padding-bottom: 20px;
+            margin-bottom: 25px;
+          }
+          .school-info {
+            font-size: 14px;
+            font-weight: bold;
+          }
+          .report-title {
+            text-align: center;
+            font-size: 22px;
+            color: #be123c;
+            font-weight: 800;
+          }
+          .notice-box {
+            background-color: #fff1f2;
+            border: 1px solid #fecdd3;
+            border-radius: 8px;
+            padding: 12px;
+            margin-bottom: 20px;
+            font-size: 12px;
+            font-weight: bold;
+            color: #9f1239;
+          }
+          table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-bottom: 30px;
+          }
+          th, td {
+            border: 1px solid #cbd5e1;
+            padding: 10px;
+            text-align: right;
+            font-size: 12px;
+          }
+          th {
+            background-color: #ffe4e6;
+            color: #9f1239;
+            font-weight: bold;
+          }
+        </style>
+      </head>
+      <body>
+        <div class="report-header">
+          <div class="school-info">
+            وزارة التعليم<br>
+            إدارة التعليم بالأحساء<br>
+            مدرسة الجشة المتوسطة
+          </div>
+          <div class="report-title">
+            كشف رصد الخروج قبل نهاية الدوام والمحاسبة النظامية
+          </div>
+          <div class="school-info" style="text-align: left;">
+            التاريخ: ${new Date().toLocaleDateString('ar-SA')}م (${toHijri(new Date())})<br>
+            نهاية الدوام المعتمدة: الأحد-الأربعاء (${config.checkoutSunWed || '12:30'}) | الخميس (${config.checkoutThu || '11:45'})
+          </div>
+        </div>
+
+        <div class="notice-box">
+          ملاحظة نظامية: المعلمون الحاصلون على استئذان معتمد معفيون من المحاسبة ولا تخصم درجاتهم. المحاسبة تطبق نظاماً على من خرج قبل نهاية الدوام دون استئذان، أو من قام بعمل بصمة الخروج في اليوم التالي قبل بصمة الدخول.
+        </div>
+
+        <div style="background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 12px; margin-bottom: 20px; font-size:13px; font-weight: bold; color: #be123c;">
+          ${selectedMonth === 'all' ? 'الفترة المستهدفة: كامل الفصل الدراسي / كل الأشهر' : `الشهر المستهدف: ${selectedMonth}`}
+          ${selectedEmployee !== 'all' ? ` | الموظف: ${selectedEmployee}` : ''}
+          | إجمالي الحالات المرصودة: ${totalEarlyCount} حالة
+        </div>
+
+        <table>
+          <thead>
+            <tr>
+              <th style="width: 5%; text-align:center;">#</th>
+              <th>اسم المعلم / الموظف</th>
+              <th>المسمى الوظيفي</th>
+              <th style="text-align:center;">التاريخ</th>
+              <th style="text-align:center;">اليوم</th>
+              <th style="text-align:center;">وقت الحضور</th>
+              <th style="text-align:center;">وقت الانصراف</th>
+              <th style="text-align:center;">الدقائق المبكرة</th>
+              <th style="text-align:center;">نوع الحالة</th>
+              <th style="text-align:center;">الموقف النظامي</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${list.length === 0 ? `
+              <tr>
+                <td colspan="10" style="text-align:center; padding: 20px; color: #047857; font-weight:bold;">
+                  لا توجد أي حالات خروج قبل نهاية الدوام مسجلة خلال الفترة المحددة ✨
+                </td>
+              </tr>
+            ` : list.map((r, idx) => {
+              const isExcused = isEmergencyLeave(r.status) || !!faresSubmitted[`${r.name}|${r.dateKey}`] || r.checkout === 'استئذان طارئ موثق (بصمة)';
+              const isWrongTime = r.checkout === 'انصراف في غير وقت الفعلي' || (r.tout && r.tout.total != null && isAbnormalMorningCheckout(r.tin, r.tout));
+              return `
+                <tr>
+                  <td style="text-align:center;">${idx + 1}</td>
+                  <td><b>${r.name}</b></td>
+                  <td>${r.job || '-'}</td>
+                  <td style="text-align:center;">${formatPrintDate(r.date)}</td>
+                  <td style="text-align:center;">${dayName(r.date)}</td>
+                  <td style="text-align:center;">${r.tin?.text || '-'}</td>
+                  <td style="text-align:center; font-weight:bold; color:#be123c;">${r.tout?.text || '-'}</td>
+                  <td style="text-align:center; font-weight:bold;">${r.earlyMins ? `${r.earlyMins} دقيقة` : '-'}</td>
+                  <td style="text-align:center;">${isWrongTime ? 'بصمة في اليوم التالي قبل الدخول' : (r.checkout || 'خروج مبكر')}</td>
+                  <td style="text-align:center; font-weight:bold; color:${isExcused ? '#059669' : '#be123c'};">
+                    ${isExcused ? '✓ معفى (استئذان معتمد)' : '⚠️ خاضع للمساءلة والمحاسبة'}
+                  </td>
+                </tr>
+              `;
+            }).join('')}
+          </tbody>
+        </table>
+
+        <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-top: 45px; font-weight:bold; font-size:13px;">
+          <div style="text-align: right; min-width: 260px;">
+            <div>المعلم / الموظف: ${targetTeacher || '...........................................'}</div>
+            <div style="margin-top: 18px;">التوقيع: ............................................</div>
+          </div>
+          <div style="text-align: left; min-width: 260px;">
+            <div>مدير المدرسة: ............................................</div>
+            <div style="margin-top: 18px;">التوقيع: ............................................</div>
+          </div>
+        </div>
+
+        <script>
+          window.onload = function() {
+            window.focus();
+            window.print();
+          }
+        <\/script>
+      </body>
+      </html>
+    `;
+
+    printWindow.document.open();
+    printWindow.document.write(printHtml);
+    printWindow.document.close();
+  };
+
+  const handleExportEarlyListWord = () => {
+    const list = filterDailyRecords(dailyRecords).filter(r => {
+      if (earlyFilterType === 'early_only') {
+        const isExcused = isEmergencyLeave(r.status) || !!faresSubmitted[`${r.name}|${r.dateKey}`] || r.checkout === 'استئذان طارئ موثق (بصمة)';
+        return (r.checkout === 'خروج قبل نهاية الدوام' || r.checkout === 'انصراف مبكر' || (r.earlyMins || 0) > 0) && !isExcused;
+      }
+      if (earlyFilterType === 'wrong_time') {
+        return r.checkout === 'انصراف في غير وقت الفعلي' || (r.tout && r.tout.total != null && isAbnormalMorningCheckout(r.tin, r.tout));
+      }
+      if (earlyFilterType === 'exempt') {
+        const isExcused = isEmergencyLeave(r.status) || !!faresSubmitted[`${r.name}|${r.dateKey}`] || r.checkout === 'استئذان طارئ موثق (بصمة)';
+        return isExcused && (r.checkout === 'استئذان طارئ موثق (بصمة)' || r.checkout === 'خروج قبل نهاية الدوام' || (r.earlyMins || 0) > 0);
+      }
+      if (earlyFilterType === 'all') {
+        const isExcused = isEmergencyLeave(r.status) || !!faresSubmitted[`${r.name}|${r.dateKey}`] || r.checkout === 'استئذان طارئ موثق (بصمة)';
+        const isEarly = r.checkout === 'خروج قبل نهاية الدوام' || r.checkout === 'انصراف مبكر' || (r.earlyMins || 0) > 0;
+        const isNextDay = r.checkout === 'انصراف في غير وقت الفعلي' || (r.tout && r.tout.total != null && isAbnormalMorningCheckout(r.tin, r.tout));
+        return isEarly || isNextDay || isExcused;
+      }
+      return isAccountableEarlyCheckoutRecord(r, faresSubmitted);
+    }).sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+
+    const targetTeacher = selectedEmployee !== 'all' 
+      ? selectedEmployee 
+      : (Array.from(new Set(list.map(r => r.name))).length === 1 
+          ? Array.from(new Set(list.map(r => r.name)))[0] 
+          : '');
+
+    const wordHtml = `
+      <html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'>
+      <head>
+        <title>كشف رصد الخروج قبل نهاية الدوام</title>
+        <style>
+          body { font-family: 'Arial', sans-serif; direction: rtl; text-align: right; }
+          .header { border-bottom: 2px solid #e11d48; padding-bottom: 10px; margin-bottom: 20px; }
+          .table { width: 100%; border-collapse: collapse; margin-top: 15px; }
+          .table th, .table td { border: 1px solid #999; padding: 8px; text-align: right; }
+          .table th { background-color: #e11d48; color: #ffffff; }
+        </style>
+      </head>
+      <body>
+        <div class="header">
+          <h2>مدرسة الجشة المتوسطة - إدارة التعليم بالأحساء</h2>
+          <h3>كشف رصد الخروج قبل نهاية الدوام والمحاسبة النظامية (إجمالي الحالات: ${list.length})</h3>
+          <p>
+            ${selectedMonth === 'all' ? 'الفترة: كامل الفصل الدراسي' : `الشهر: ${selectedMonth}`}
+            | تاريخ التصدير: ${new Date().toLocaleDateString('ar-SA')}م (${toHijri(new Date())})
+          </p>
+          <p style="color:#be123c; font-weight:bold;">
+            ملاحظة: المعلمون الحاصلون على استئذان معتمد معفيون من المحاسبة ولا تخصم درجاتهم.
+          </p>
+        </div>
+
+        <table class="table">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>اسم المعلم / الموظف</th>
+              <th>المسمى الوظيفي</th>
+              <th style="text-align:center;">التاريخ</th>
+              <th style="text-align:center;">اليوم</th>
+              <th style="text-align:center;">وقت الحضور</th>
+              <th style="text-align:center;">وقت الانصراف</th>
+              <th style="text-align:center;">الدقائق المبكرة</th>
+              <th style="text-align:center;">نوع الحالة</th>
+              <th style="text-align:center;">الموقف النظامي</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${list.map((r, idx) => {
+              const isExcused = isEmergencyLeave(r.status) || !!faresSubmitted[`${r.name}|${r.dateKey}`] || r.checkout === 'استئذان طارئ موثق (بصمة)';
+              const isWrongTime = r.checkout === 'انصراف في غير وقت الفعلي' || (r.tout && r.tout.total != null && isAbnormalMorningCheckout(r.tin, r.tout));
+              return `
+                <tr>
+                  <td>${idx + 1}</td>
+                  <td><b>${r.name}</b></td>
+                  <td>${r.job || '-'}</td>
+                  <td style="text-align:center;">${formatWordDate(r.date)}</td>
+                  <td style="text-align:center;">${dayName(r.date)}</td>
+                  <td style="text-align:center;">${r.tin?.text || '-'}</td>
+                  <td style="text-align:center;">${r.tout?.text || '-'}</td>
+                  <td style="text-align:center;">${r.earlyMins ? `${r.earlyMins} دقيقة` : '-'}</td>
+                  <td style="text-align:center;">${isWrongTime ? 'بصمة في اليوم التالي قبل الدخول' : (r.checkout || 'خروج مبكر')}</td>
+                  <td style="text-align:center;">${isExcused ? 'معفى (استئذان معتمد)' : 'خاضع للمساءلة'}</td>
+                </tr>
+              `;
+            }).join('')}
+          </tbody>
+        </table>
+
+        <div style="margin-top: 40px; font-size: 13px; font-weight: bold;">
+          <table style="width: 100%; border: none;">
+            <tr>
+              <td style="border: none; text-align: right; width: 50%;">
+                المعلم / الموظف: ${targetTeacher || '...........................................'}<br><br>
+                التوقيع: ............................................
+              </td>
+              <td style="border: none; text-align: left; width: 50%;">
+                مدير المدرسة: ............................................<br><br>
+                التوقيع: ............................................
+              </td>
+            </tr>
+          </table>
+        </div>
+      </body>
+      </html>
+    `;
+
+    const blob = new Blob(['\ufeff' + wordHtml], { type: 'application/msword' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `كشف_الخروج_قبل_نهاية_الدوام_${(selectedMonth === 'all' ? 'كامل' : selectedMonth).replace(/\s+/g, '_')}.doc`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
   const handlePrintAbsenceList = () => {
     const list = filterDailyRecords(dailyRecords)
       .filter(r => r.type === 'absence')
@@ -4026,6 +4368,25 @@ export default function App() {
             </button>
 
             <button
+              onClick={() => { setCurrentTab('early'); setSelectedStatus('all'); }}
+              className={`w-full flex items-center justify-between p-3.5 rounded-xl text-right font-bold transition-all border border-white/5 ${
+                currentTab === 'early'
+                  ? 'bg-white text-teal-950 shadow-md'
+                  : 'bg-white/5 text-white hover:bg-white/10'
+              }`}
+            >
+              <span className="flex items-center gap-3">
+                <LogOut className="w-5 h-5 text-rose-400" />
+                <span>الخروج قبل نهاية الدوام</span>
+              </span>
+              {dailyRecords.length > 0 && stats.totalAccountableEarly > 0 && (
+                <span className="bg-rose-500/30 text-rose-300 text-xs px-2 py-1 rounded-full font-bold">
+                  {stats.totalAccountableEarly}
+                </span>
+              )}
+            </button>
+
+            <button
               onClick={() => { setCurrentTab('absence'); setSelectedStatus('all'); }}
               className={`w-full flex items-center justify-between p-3.5 rounded-xl text-right font-bold transition-all border border-white/5 ${
                 currentTab === 'absence'
@@ -4119,6 +4480,7 @@ export default function App() {
                 {currentTab === 'dashboard' && '📊 لوحة التحكم والمؤشرات'}
                 {currentTab === 'attendance' && '👤 سجل الحضور والمنسوبين'}
                 {currentTab === 'late' && '🕒 رصد التأخر الصباحي'}
+                {currentTab === 'early' && '🚪 كشف رصد الخروج قبل نهاية الدوام (الخاضعين للمحاسبة)'}
                 {currentTab === 'absence' && '📅 رصد الغياب بدون عذر'}
                 {currentTab === 'excuses' && '📄 سجل الغياب بعذر والمسوغات'}
                 {currentTab === 'monthly' && '📈 التقارير الدورية والملخصات'}
@@ -4347,9 +4709,27 @@ export default function App() {
                       <span className="text-3xl font-extrabold text-slate-700 mt-2">{stats.totalLateMins}</span>
                     </div>
 
-                    <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm flex flex-col justify-between">
-                      <span className="text-xs text-slate-400 font-bold">دقائق الخروج المبكر</span>
-                      <span className="text-3xl font-extrabold text-rose-500 mt-2">{stats.totalEarlyMins}</span>
+                    <div
+                      onClick={() => {
+                        setSelectedStatus('early_accountable');
+                        setEarlyFilterType('accountable');
+                        setCurrentTab('early');
+                      }}
+                      className="bg-white p-3.5 rounded-2xl border border-rose-200 shadow-sm flex flex-col justify-between cursor-pointer hover:border-rose-400 hover:shadow-md transition-all group"
+                      title="اضغط لعرض كشف المعلمين الخارجين قبل نهاية الدوام والخاضعين للمحاسبة"
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs text-rose-700 font-bold">خروج قبل الدوام (محاسبة)</span>
+                        <span className="text-[9px] bg-rose-100 text-rose-800 px-1.5 py-0.5 rounded-md font-extrabold">{stats.totalAccountableEarly} حالة</span>
+                      </div>
+                      <div className="flex items-baseline gap-2 mt-2">
+                        <span className="text-3xl font-extrabold text-rose-600">{stats.totalEarlyMins}</span>
+                        <span className="text-xs font-bold text-slate-400">دقيقة</span>
+                      </div>
+                      <div className="mt-2 text-[10px] text-rose-700 border-t border-rose-50 pt-1 flex items-center justify-between font-bold group-hover:text-rose-900">
+                        <span>كشف المحاسبة</span>
+                        <span>←</span>
+                      </div>
                     </div>
 
                     <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm flex flex-col justify-between">
@@ -4982,12 +5362,14 @@ export default function App() {
                           className="bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-sm font-bold text-slate-700 outline-none focus:border-teal-500 transition-all"
                         >
                           <option value="all">كل حالات الانصراف اليومية</option>
-                          <option value="early">خروج قبل نهاية الدوام (انصراف مبكر)</option>
+                          <option value="early_accountable">⚠️ خروج قبل نهاية الدوام (الخاضعين للمحاسبة / بصمة اليوم التالي)</option>
+                          <option value="early_no_excuse">🚪 خروج قبل نهاية الدوام فقط (بدون استئذان)</option>
+                          <option value="wrong_time">⏱️ بصمة خروج في اليوم التالي قبل بصمة الدخول</option>
+                          <option value="early_exempt">✓ خروج مبكر باستئذان معتمد (معفى من المحاسبة)</option>
                           <option value="auto">انصراف تلقائي من النظام</option>
                           <option value="missingCheckout">غياب بصمة الانصراف اليومية</option>
                           <option value="emergency_no_exit">⚠️ استئذان طارئ بدون بصمة انصراف (مخالف)</option>
                           <option value="emergency_with_exit">✓ استئذان طارئ موثق ببصمة انصراف</option>
-                          <option value="wrong_time">انصراف في غير وقت الفعلي (بصمة صباحية/اليوم التالي)</option>
                         </select>
                       </div>
                     </div>
@@ -5248,6 +5630,376 @@ export default function App() {
                                 </td>
                               </tr>
                             ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* C. EARLY EXIT & ACCOUNTABILITY TAB */}
+              {currentTab === 'early' && (
+                <div className="space-y-6">
+                  {/* EARLY EXIT NOTICE BANNER */}
+                  <div className="bg-gradient-to-r from-amber-50 via-rose-50 to-orange-50 border-2 border-amber-300 rounded-2xl p-5 text-sm leading-relaxed shadow-xs" dir="rtl">
+                    <div className="flex items-start gap-3.5">
+                      <div className="bg-amber-600 text-white p-2 rounded-xl mt-0.5 shrink-0">
+                        <AlertTriangle className="w-5 h-5" />
+                      </div>
+                      <div>
+                        <h4 className="font-black text-amber-950 text-base mb-1.5 flex items-center gap-2">
+                          <span>📌 ضوابط خروج المعلمين قبل نهاية الدوام ومحددات المساءلة النظامية</span>
+                        </h4>
+                        <div className="space-y-1.5 text-xs text-slate-700 font-medium">
+                          <p className="flex items-center gap-1.5">
+                            <span className="inline-block w-2 h-2 rounded-full bg-emerald-500"></span>
+                            <span><strong>المعفي من المساءلة والمحاسبة:</strong> أي معلم أو موظف لديه <strong className="text-emerald-800">استئذان رسمي موثق أو عذر معتمد في نظام فارس</strong>، يعتبر معفى نظاماً ولا يتم احتسابه ضمن المخالفين أو مساءلته.</span>
+                          </p>
+                          <p className="flex items-center gap-1.5">
+                            <span className="inline-block w-2 h-2 rounded-full bg-rose-500"></span>
+                            <span><strong>الخاضع للمحاسبة والمساءلة:</strong> يتم محاسبة من خرج قبل نهاية الدوام الرسمي المحدد <strong className="text-rose-700">(بدون استئذان)</strong>، أو من قام بتسجيل بصمة الخروج في <strong className="text-rose-700">اليوم التالي قبل بصمة الدخول الصباحية</strong> (انصراف غير فعلي).</span>
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* SUMMARY CARDS */}
+                  {(() => {
+                    const baseDaily = filterDailyRecords(dailyRecords).filter(r => r.type === 'present');
+                    const totalAcc = baseDaily.filter(r => isAccountableEarlyCheckoutRecord(r, faresSubmitted)).length;
+                    const totalEarlyOnly = baseDaily.filter(r => (r.earlyMins > 0) && !isAbnormalMorningCheckout(r.tin, r.tout) && !isExcusedEarlyCheckoutRecord(r, faresSubmitted)).length;
+                    const totalWrong = baseDaily.filter(r => isAbnormalMorningCheckout(r.tin, r.tout) && !isExcusedEarlyCheckoutRecord(r, faresSubmitted)).length;
+                    const totalEx = baseDaily.filter(r => isExcusedEarlyCheckoutRecord(r, faresSubmitted)).length;
+
+                    return (
+                      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4" dir="rtl">
+                        <div
+                          onClick={() => setEarlyFilterType('accountable')}
+                          className={`p-4 rounded-2xl border transition-all cursor-pointer ${
+                            earlyFilterType === 'accountable'
+                              ? 'bg-rose-50 border-rose-400 shadow-sm ring-2 ring-rose-300'
+                              : 'bg-white border-slate-200 hover:border-rose-300'
+                          }`}
+                        >
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs font-bold text-slate-500">الخاضعين للمحاسبة</span>
+                            <span className="text-[10px] bg-rose-100 text-rose-800 px-2 py-0.5 rounded-md font-black">مخالفة</span>
+                          </div>
+                          <div className="text-3xl font-black text-rose-600 mt-2">{totalAcc}</div>
+                          <div className="text-[10px] text-slate-400 mt-1 font-semibold">خروج بلا عذر + بصمة اليوم التالي</div>
+                        </div>
+
+                        <div
+                          onClick={() => setEarlyFilterType('early_only')}
+                          className={`p-4 rounded-2xl border transition-all cursor-pointer ${
+                            earlyFilterType === 'early_only'
+                              ? 'bg-amber-50 border-amber-400 shadow-sm ring-2 ring-amber-300'
+                              : 'bg-white border-slate-200 hover:border-amber-300'
+                          }`}
+                        >
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs font-bold text-slate-500">خروج قبل نهاية الدوام</span>
+                            <span className="text-[10px] bg-amber-100 text-amber-800 px-2 py-0.5 rounded-md font-black">بلا استئذان</span>
+                          </div>
+                          <div className="text-3xl font-black text-amber-600 mt-2">{totalEarlyOnly}</div>
+                          <div className="text-[10px] text-slate-400 mt-1 font-semibold">خروج مبكر في نفس اليوم</div>
+                        </div>
+
+                        <div
+                          onClick={() => setEarlyFilterType('wrong_time')}
+                          className={`p-4 rounded-2xl border transition-all cursor-pointer ${
+                            earlyFilterType === 'wrong_time'
+                              ? 'bg-purple-50 border-purple-400 shadow-sm ring-2 ring-purple-300'
+                              : 'bg-white border-slate-200 hover:border-purple-300'
+                          }`}
+                        >
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs font-bold text-slate-500">بصمة خروج اليوم التالي</span>
+                            <span className="text-[10px] bg-purple-100 text-purple-800 px-2 py-0.5 rounded-md font-black">قبل الدخول</span>
+                          </div>
+                          <div className="text-3xl font-black text-purple-600 mt-2">{totalWrong}</div>
+                          <div className="text-[10px] text-slate-400 mt-1 font-semibold">انصراف مسجل صباح اليوم التالي</div>
+                        </div>
+
+                        <div
+                          onClick={() => setEarlyFilterType('exempt')}
+                          className={`p-4 rounded-2xl border transition-all cursor-pointer ${
+                            earlyFilterType === 'exempt'
+                              ? 'bg-emerald-50 border-emerald-400 shadow-sm ring-2 ring-emerald-300'
+                              : 'bg-white border-slate-200 hover:border-emerald-300'
+                          }`}
+                        >
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs font-bold text-slate-500">معفى من المحاسبة</span>
+                            <span className="text-[10px] bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded-md font-black">استئذان معتمد ✓</span>
+                          </div>
+                          <div className="text-3xl font-black text-emerald-600 mt-2">{totalEx}</div>
+                          <div className="text-[10px] text-slate-400 mt-1 font-semibold">استئذان رسمي موثق</div>
+                        </div>
+                      </div>
+                    );
+                  })()}
+
+                  {/* FILTERS TOOLBAR */}
+                  <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-xs flex flex-wrap items-center justify-between gap-4">
+                    <div className="flex flex-wrap items-center gap-3">
+                      <div>
+                        <label className="block text-[10px] font-bold text-slate-400 mb-1">تصفية الفترة حسب</label>
+                        <select
+                          value={selectedPeriodType}
+                          onChange={(e) => setSelectedPeriodType(e.target.value as 'month' | 'range')}
+                          className="bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-sm font-bold text-slate-700 outline-none focus:border-rose-500 transition-all"
+                        >
+                          <option value="month">📅 الشهر</option>
+                          <option value="range">🗓️ نطاق تاريخ</option>
+                        </select>
+                      </div>
+
+                      {selectedPeriodType === 'month' ? (
+                        <div>
+                          <label className="block text-[10px] font-bold text-slate-400 mb-1">
+                            {selectedMonth === 'all' ? 'الفترة المستهدفة' : 'الشهر المستهدف'}
+                          </label>
+                          <select
+                            value={selectedMonth}
+                            onChange={(e) => setSelectedMonth(e.target.value)}
+                            className="bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-sm font-bold text-slate-700 outline-none focus:border-rose-500 transition-all"
+                          >
+                            <option value="all">كل الأشهر المسجلة</option>
+                            {getMonthsList().map(m => (
+                              <option key={m} value={m}>{m}</option>
+                            ))}
+                          </select>
+                        </div>
+                      ) : (
+                        <>
+                          <div>
+                            <label className="block text-[10px] font-bold text-slate-400 mb-1">من تاريخ</label>
+                            <input
+                              type="date"
+                              value={selectedStartDate}
+                              onChange={(e) => setSelectedStartDate(e.target.value)}
+                              className="bg-slate-50 border border-slate-200 rounded-xl px-3 py-1.5 text-sm font-bold text-slate-700 outline-none focus:border-rose-500 transition-all h-[38px]"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[10px] font-bold text-slate-400 mb-1">إلى تاريخ</label>
+                            <input
+                              type="date"
+                              value={selectedEndDate}
+                              onChange={(e) => setSelectedEndDate(e.target.value)}
+                              className="bg-slate-50 border border-slate-200 rounded-xl px-3 py-1.5 text-sm font-bold text-slate-700 outline-none focus:border-rose-500 transition-all h-[38px]"
+                            />
+                          </div>
+                        </>
+                      )}
+
+                      <div>
+                        <label className="block text-[10px] font-bold text-slate-400 mb-1">الموظف / المعلم</label>
+                        <select
+                          value={selectedEmployee}
+                          onChange={(e) => setSelectedEmployee(e.target.value)}
+                          className="bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-sm font-bold text-slate-700 outline-none focus:border-rose-500 transition-all max-w-[220px]"
+                        >
+                          <option value="all">جميع المعلمين والموظفين</option>
+                          {getEmployeesNames().map(name => (
+                            <option key={name} value={name}>{name}</option>
+                          ))}
+                        </select>
+                      </div>
+
+                      <div>
+                        <label className="block text-[10px] font-bold text-slate-400 mb-1">تصفية نوع الحالة</label>
+                        <select
+                          value={earlyFilterType}
+                          onChange={(e) => setEarlyFilterType(e.target.value as any)}
+                          className="bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-sm font-bold text-slate-700 outline-none focus:border-rose-500 transition-all"
+                        >
+                          <option value="accountable">⚠️ الخاضعين للمحاسبة (غير مبرر + بصمة اليوم التالي)</option>
+                          <option value="early_only">🚪 خروج قبل نهاية الدوام فقط (بدون استئذان)</option>
+                          <option value="wrong_time">⏱️ بصمة خروج في اليوم التالي قبل بصمة الدخول</option>
+                          <option value="exempt">✓ خروج باستئذان معتمد (معفى من المحاسبة)</option>
+                          <option value="all">📋 جميع الحالات (المحاسبين + المعفيين)</option>
+                        </select>
+                      </div>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-3">
+                      <div className="w-full sm:w-60">
+                        <label className="block text-[10px] font-bold text-slate-400 mb-1">البحث بالاسم</label>
+                        <input
+                          type="text"
+                          placeholder="ابحث عن اسم موظف..."
+                          value={searchTerm}
+                          onChange={(e) => setSearchTerm(e.target.value)}
+                          className="bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-sm w-full outline-none focus:border-rose-500 transition-all font-medium"
+                        />
+                      </div>
+                      <div className="flex items-end gap-2">
+                        <button
+                          onClick={handlePrintEarlyList}
+                          className="bg-rose-600 hover:bg-rose-700 text-white font-bold px-4 py-2 rounded-xl text-xs flex items-center gap-1.5 transition-all shadow-xs h-[38px]"
+                          title="طباعة كشف الخروج قبل نهاية الدوام PDF"
+                        >
+                          <Printer className="w-4 h-4" />
+                          <span>طباعة PDF</span>
+                        </button>
+                        <button
+                          onClick={handleExportEarlyListWord}
+                          className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold px-3 py-2 rounded-xl text-xs flex items-center gap-1.5 transition-all shadow-xs h-[38px]"
+                          title="تصدير كشف الخروج قبل نهاية الدوام Word"
+                        >
+                          <FileDown className="w-4 h-4" />
+                          <span>Word</span>
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* TABLE OF EARLY RECORDS */}
+                  <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-sm">
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-right text-sm border-collapse">
+                        <thead>
+                          <tr className="bg-slate-50 text-slate-600 border-b border-slate-200">
+                            <th className="p-3 font-bold text-center">#</th>
+                            <th className="p-3 font-bold">اسم المعلم / الموظف</th>
+                            <th className="p-3 font-bold">المسمى الوظيفي</th>
+                            <th className="p-3 font-bold text-center">التاريخ</th>
+                            <th className="p-3 font-bold text-center">اليوم</th>
+                            <th className="p-3 font-bold text-center">وقت الانصراف المسجل</th>
+                            <th className="p-3 font-bold text-center">الانصراف المفترض</th>
+                            <th className="p-3 font-bold text-center">التبكير</th>
+                            <th className="p-3 font-bold text-center">حالة الاستئذان / المساءلة</th>
+                            <th className="p-3 font-bold text-center">الإجراء المتاح</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {(() => {
+                            const filtered = filterDailyRecords(dailyRecords)
+                              .filter(r => r.type === 'present')
+                              .filter(r => {
+                                const isAcc = isAccountableEarlyCheckoutRecord(r, faresSubmitted);
+                                const isEx = isExcusedEarlyCheckoutRecord(r, faresSubmitted);
+                                const isWrong = isAbnormalMorningCheckout(r.tin, r.tout);
+                                const isEarly = (r.earlyMins > 0) && !isWrong && !isEx;
+
+                                if (earlyFilterType === 'accountable') return isAcc;
+                                if (earlyFilterType === 'early_only') return isEarly;
+                                if (earlyFilterType === 'wrong_time') return isWrong;
+                                if (earlyFilterType === 'exempt') return isEx;
+                                return isAcc || isEx;
+                              })
+                              .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+
+                            if (filtered.length === 0) {
+                              return (
+                                <tr>
+                                  <td colSpan={10} className="p-12 text-center text-slate-400 font-bold">
+                                    <div className="max-w-md mx-auto space-y-2">
+                                      <CheckCircle2 className="w-10 h-10 text-emerald-500 mx-auto" />
+                                      <p className="text-base text-slate-600 font-extrabold">لا توجد سجلات مطابقة لهذه التصفية</p>
+                                      <p className="text-xs text-slate-400 font-normal">
+                                        جميع المعلمين ملتزمون بمواعيد نهاية الدوام المعتمدة أو لديهم استئذان رسمي موثق
+                                      </p>
+                                    </div>
+                                  </td>
+                                </tr>
+                              );
+                            }
+
+                            return filtered.map((r, i) => {
+                              const isAcc = isAccountableEarlyCheckoutRecord(r, faresSubmitted);
+                              const isEx = isExcusedEarlyCheckoutRecord(r, faresSubmitted);
+                              const isWrong = isAbnormalMorningCheckout(r.tin, r.tout);
+                              const expCheckout = new Date(r.date).getDay() === 4 ? (config.checkoutThu || '11:45') : (config.checkoutSunWed || '12:30');
+                              const recordKey = `${r.name}|${r.dateKey}`;
+                              const hasFaresExcuse = !!faresSubmitted[recordKey];
+
+                              return (
+                                <tr key={recordKey + i} className="border-b border-slate-100 hover:bg-slate-50/50 transition-all">
+                                  <td className="p-3 text-center text-slate-400 font-mono text-xs">{i + 1}</td>
+                                  <td className="p-3 font-bold text-slate-800">{r.name}</td>
+                                  <td className="p-3 text-slate-400 text-xs">{r.job || '-'}</td>
+                                  <td className="p-3 text-center">{renderDateCell(r.date)}</td>
+                                  <td className="p-3 text-center text-slate-500 text-xs font-semibold">{dayName(r.date)}</td>
+                                  <td className="p-3 text-center font-mono font-bold text-rose-600">{r.tout?.text || '-'}</td>
+                                  <td className="p-3 text-center font-mono text-xs text-slate-500">{expCheckout}</td>
+                                  <td className="p-3 text-center">
+                                    {isWrong ? (
+                                      <span className="bg-purple-100 text-purple-800 font-bold text-xs px-2.5 py-1 rounded-full">
+                                        بصمة صباحية (اليوم التالي)
+                                      </span>
+                                    ) : (
+                                      <span className="bg-rose-100 text-rose-800 font-bold text-xs px-2.5 py-1 rounded-full">
+                                        {r.earlyMins} دقيقة
+                                      </span>
+                                    )}
+                                  </td>
+                                  <td className="p-3 text-center">
+                                    {isEx ? (
+                                      <div className="inline-flex flex-col items-center">
+                                        <span className="bg-emerald-100 text-emerald-800 font-bold text-xs px-2.5 py-1 rounded-full inline-flex items-center gap-1">
+                                          <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+                                          <span>معفى (استئذان معتمد)</span>
+                                        </span>
+                                        <span className="text-[10px] text-emerald-600 font-medium mt-0.5">لا يحاسب نظاماً</span>
+                                      </div>
+                                    ) : isWrong ? (
+                                      <div className="inline-flex flex-col items-center">
+                                        <span className="bg-purple-100 text-purple-900 font-bold text-xs px-2.5 py-1 rounded-full inline-flex items-center gap-1">
+                                          <AlertCircle className="w-3 h-3 text-purple-600" />
+                                          <span>بصمة اليوم التالي</span>
+                                        </span>
+                                        <span className="text-[10px] text-purple-700 font-bold mt-0.5">خاضع للمحاسبة (قبل بصمة الدخول)</span>
+                                      </div>
+                                    ) : (
+                                      <div className="inline-flex flex-col items-center">
+                                        <span className="bg-rose-100 text-rose-900 font-bold text-xs px-2.5 py-1 rounded-full inline-flex items-center gap-1">
+                                          <AlertTriangle className="w-3 h-3 text-rose-600" />
+                                          <span>خروج قبل نهاية الدوام</span>
+                                        </span>
+                                        <span className="text-[10px] text-rose-600 font-bold mt-0.5">خاضع للمحاسبة (في نفس اليوم)</span>
+                                      </div>
+                                    )}
+                                  </td>
+                                  <td className="p-3 text-center">
+                                    <div className="flex items-center justify-center gap-1.5">
+                                      <button
+                                        onClick={() => toggleFaresStatus(recordKey)}
+                                        className={`font-bold px-2 py-1.5 rounded-lg text-xs transition-all inline-flex items-center gap-1 border ${
+                                          hasFaresExcuse
+                                            ? 'bg-emerald-50 text-emerald-700 border-emerald-300 hover:bg-emerald-100'
+                                            : 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-emerald-50 hover:text-emerald-700'
+                                        }`}
+                                        title={hasFaresExcuse ? 'إلغاء اعتماد الاستئذان' : 'اعتماد استئذان / إعفاء من المحاسبة'}
+                                      >
+                                        <Check className="w-3.5 h-3.5" />
+                                        <span>{hasFaresExcuse ? 'إلغاء الإعفاء' : 'اعتماد استئذان'}</span>
+                                      </button>
+                                      <button
+                                        onClick={() => handleOpenMessageModal(recordKey)}
+                                        className="text-rose-700 bg-rose-50 hover:bg-rose-100 font-bold px-2 py-1.5 rounded-lg text-xs transition-all inline-flex items-center gap-1"
+                                        title="إرسال إشعار مساءلة عبر واتساب"
+                                      >
+                                        <MessageSquare className="w-3.5 h-3.5" />
+                                        <span>تنبيه</span>
+                                      </button>
+                                      <button
+                                        onClick={() => setEditingRecord(r)}
+                                        className="text-amber-700 bg-amber-50 hover:bg-amber-100 font-bold px-2 py-1.5 rounded-lg text-xs transition-all inline-flex items-center gap-1"
+                                        title="تعديل وقت البصمة"
+                                      >
+                                        <Edit className="w-3.5 h-3.5" />
+                                        <span>تعديل</span>
+                                      </button>
+                                    </div>
+                                  </td>
+                                </tr>
+                              );
+                            });
+                          })()}
                         </tbody>
                       </table>
                     </div>
