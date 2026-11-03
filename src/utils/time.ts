@@ -614,11 +614,11 @@ export function formatMinutesToHours(mins: number): string {
   const remainingMins = mins % 60;
   if (hours === 0) return `${mins} دقيقة`;
   if (remainingMins === 0) {
-    if (hours === 1) return 'ساعة واحدة (60 دقيقة)';
-    if (hours === 2) return 'ساعتان (120 دقيقة)';
-    return `${hours} ساعات (${mins} دقيقة)`;
+    if (hours === 1) return 'ساعة واحدة';
+    if (hours === 2) return 'ساعتان';
+    return `${hours} ساعات`;
   }
-  return `${mins} دقيقة (${hours} س و ${remainingMins} د)`;
+  return `${hours} س و ${remainingMins} د`;
 }
 
 export interface PermissionDurationResult {
@@ -678,10 +678,11 @@ export function calculatePermissionDuration(
   const hasOut = !!(r.tout && r.tout.total != null && r.tout.text !== '-');
   const hasIn = !!(r.tin && r.tin.total != null && r.tin.text !== '-');
 
-  // Case 1: Early departure permission (بصمة خروج قبل نهاية الدوام الرسمي المحدد)
-  // مثال المستخدم الصريح: استئذان 12:00 إلى 12:30 -> 30 دقيقة
-  // مثال الأستاذ علي الياسين في الصورة: استئذان 11:15 إلى 12:30 -> 75 دقيقة
-  if (hasOut && r.tout!.total! < standardCheckoutTotal) {
+  // A genuine daytime departure checkout (must be 08:30 AM or later, not an early morning arrival punch)
+  const isValidDaytimeCheckout = hasOut && r.tout!.total! >= 8.5 * 60;
+
+  // Case 1: Daytime early departure permission (e.g. left at 09:16, 09:19, 11:03, 11:15, 12:00)
+  if (isValidDaytimeCheckout && r.tout!.total! < standardCheckoutTotal) {
     const diff = Math.max(0, standardCheckoutTotal - r.tout!.total!);
     return {
       fromTime: r.tout!.text,
@@ -692,8 +693,7 @@ export function calculatePermissionDuration(
     };
   }
 
-  // Case 2: Morning delay permission (استئذان حضور بعد بداية الدوام)
-  // مثال: حضور 07:30 وبداية الدوام 06:45 -> 45 دقيقة
+  // Case 2: Morning arrival delay permission (e.g. arrived at 07:30, start is 06:45 -> 45 min)
   if (hasIn && (r.late || 0) > 0) {
     const lMins = r.late || 0;
     return {
@@ -705,8 +705,8 @@ export function calculatePermissionDuration(
     };
   }
 
-  // Case 3: Departure was registered at or after standard checkout (e.g. 12:51 in the screenshot)
-  if (hasOut) {
+  // Case 3: Departure was registered at or after standard checkout (e.g. 12:51)
+  if (isValidDaytimeCheckout && r.tout!.total! >= standardCheckoutTotal) {
     return {
       fromTime: '12:00',
       toTime: standardCheckout,
@@ -716,12 +716,13 @@ export function calculatePermissionDuration(
     };
   }
 
-  // Fallback
+  // Case 4: Early morning punch (< 08:30) or missing checkout punch
+  // Fallback to standard 30 min duration instead of inflating to 5+ hours
   return {
-    fromTime: standardStart,
-    toTime: standardStart,
-    minutes: 0,
-    formattedText: '0 دقيقة',
+    fromTime: '12:00',
+    toTime: standardCheckout,
+    minutes: 30,
+    formattedText: '30 دقيقة (افتراضي)',
     typeLabel: 'استئذان',
   };
 }

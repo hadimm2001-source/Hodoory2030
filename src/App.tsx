@@ -7824,29 +7824,28 @@ export default function App() {
                                     {(() => {
                                       const dur = calculatePermissionDuration(r, config, permissionTimeOverrides[rKey]);
                                       return (
-                                        <div className="inline-flex flex-col items-center">
-                                          <div className="text-xs font-bold text-slate-700 flex items-center gap-1.5" dir="rtl">
-                                            <span className="text-slate-400 font-semibold text-[11px]">من</span>
-                                            <span className="font-mono text-teal-800 bg-teal-50 px-1.5 py-0.5 rounded-md border border-teal-200/70 font-black text-xs">
-                                              {dur.fromTime}
-                                            </span>
-                                            <span className="text-slate-400 font-semibold text-[11px]">إلى</span>
-                                            <span className="font-mono text-slate-800 bg-slate-100 px-1.5 py-0.5 rounded-md border border-slate-200 font-black text-xs">
-                                              {dur.toTime}
-                                            </span>
-                                          </div>
-                                          <div className="mt-1 flex items-center gap-1">
-                                            <span className="bg-amber-100 text-amber-950 border border-amber-300 font-extrabold text-[11px] px-2.5 py-0.5 rounded-full shadow-2xs">
-                                              ⏱️ {dur.formattedText}
+                                        <div className="inline-flex flex-col items-center justify-center gap-1">
+                                          {/* Clean unified Duration Badge with embedded edit icon */}
+                                          <div className="inline-flex items-center gap-1.5 bg-amber-50 hover:bg-amber-100/80 text-amber-950 border border-amber-200/90 px-2.5 py-1 rounded-xl shadow-2xs transition-all">
+                                            <Clock className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                                            <span className="font-black text-xs">
+                                              {dur.formattedText}
                                             </span>
                                             <button
                                               type="button"
                                               onClick={() => handleOpenPermissionTimeModal(r)}
-                                              className="p-1 text-slate-400 hover:text-teal-700 hover:bg-teal-50 rounded-md transition-all cursor-pointer"
+                                              className="text-amber-500 hover:text-amber-900 transition-colors p-0.5 rounded hover:bg-amber-200/50 cursor-pointer"
                                               title="تعديل وقت وفترة الاستئذان يدوياً"
                                             >
                                               <Edit className="w-3 h-3" />
                                             </button>
+                                          </div>
+
+                                          {/* Clean minimalist time span */}
+                                          <div className="text-[11px] font-mono font-medium text-slate-500 flex items-center justify-center gap-1" dir="rtl">
+                                            <span>من {dur.fromTime}</span>
+                                            <span className="text-slate-300">|</span>
+                                            <span>إلى {dur.toTime}</span>
                                           </div>
                                         </div>
                                       );
