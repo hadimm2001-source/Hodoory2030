@@ -80,7 +80,9 @@ import {
   isHoliday,
   holidaySet,
   nonWorkReason,
-  dayName
+  dayName,
+  calculatePermissionDuration,
+  formatMinutesToHours,
 } from './utils/time';
 
 import {
@@ -108,6 +110,7 @@ const LOCAL_STORAGE_KEYS = {
   MESSAGE_LOG: 'jashah_message_log_v1',
   IMPORT_STATS: 'jashah_import_stats_v1',
   LEAVE_CLASSIFICATIONS: 'jashah_leave_classifications_v1',
+  PERMISSION_TIMES: 'jashah_permission_times_v1',
 };
 
 interface CustomTooltipProps {
@@ -208,6 +211,60 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem(LOCAL_STORAGE_KEYS.LEAVE_CLASSIFICATIONS, JSON.stringify(leaveClassifications));
   }, [leaveClassifications]);
+
+  // Track custom permission start & end times and duration overrides
+  const [permissionTimeOverrides, setPermissionTimeOverrides] = useState<Record<string, { startTime?: string; endTime?: string; mins?: number }>>(() => {
+    const saved = localStorage.getItem(LOCAL_STORAGE_KEYS.PERMISSION_TIMES);
+    return saved ? JSON.parse(saved) : {};
+  });
+
+  useEffect(() => {
+    localStorage.setItem(LOCAL_STORAGE_KEYS.PERMISSION_TIMES, JSON.stringify(permissionTimeOverrides));
+  }, [permissionTimeOverrides]);
+
+  // Modal state for editing permission duration
+  const [editingPermissionRecord, setEditingPermissionRecord] = useState<ParsedRow | null>(null);
+  const [permissionModalFrom, setPermissionModalFrom] = useState<string>('12:00');
+  const [permissionModalTo, setPermissionModalTo] = useState<string>('12:30');
+
+  const handleOpenPermissionTimeModal = (r: ParsedRow) => {
+    const rKey = `${r.name}|${r.dateKey}`;
+    const current = calculatePermissionDuration(r, config, permissionTimeOverrides[rKey]);
+    setEditingPermissionRecord(r);
+    setPermissionModalFrom(current.fromTime);
+    setPermissionModalTo(current.toTime);
+  };
+
+  const handleSavePermissionTime = () => {
+    if (!editingPermissionRecord) return;
+    const rKey = `${editingPermissionRecord.name}|${editingPermissionRecord.dateKey}`;
+    const tStart = parseTime(permissionModalFrom);
+    const tEnd = parseTime(permissionModalTo);
+    let diff = 0;
+    if (tStart && tEnd && tStart.total != null && tEnd.total != null) {
+      diff = Math.max(0, tEnd.total - tStart.total);
+    }
+    setPermissionTimeOverrides(prev => ({
+      ...prev,
+      [rKey]: {
+        startTime: permissionModalFrom,
+        endTime: permissionModalTo,
+        mins: diff,
+      }
+    }));
+    setEditingPermissionRecord(null);
+  };
+
+  const handleResetPermissionTime = () => {
+    if (!editingPermissionRecord) return;
+    const rKey = `${editingPermissionRecord.name}|${editingPermissionRecord.dateKey}`;
+    setPermissionTimeOverrides(prev => {
+      const copy = { ...prev };
+      delete copy[rKey];
+      return copy;
+    });
+    setEditingPermissionRecord(null);
+  };
 
   // UI Navigation / Filter state
   const [currentTab, setCurrentTab] = useState<string>('dashboard');
@@ -4314,17 +4371,20 @@ export default function App() {
               <th style="text-align:center;">اليوم</th>
               <th style="text-align:center;">نوع الاستئذان</th>
               <th style="text-align:center;">بصمة الانصراف</th>
+              <th style="text-align:center;">مدة الاستئذان</th>
               <th style="text-align:center;">حالة التوثيق</th>
             </tr>
           </thead>
           <tbody>
             ${list.length === 0 ? `
               <tr>
-                <td colspan="8" style="text-align:center; padding: 20px; color: #64748b; font-weight:bold;">
+                <td colspan="9" style="text-align:center; padding: 20px; color: #64748b; font-weight:bold;">
                   لا توجد أي حالات استئذان مسجلة خلال هذه الفترة
                 </td>
               </tr>
-            ` : list.map((r, idx) => `
+            ` : list.map((r, idx) => {
+              const dur = calculatePermissionDuration(r, config, permissionTimeOverrides[`${r.name}|${r.dateKey}`]);
+              return `
               <tr>
                 <td style="text-align:center;">${idx + 1}</td>
                 <td><b>${r.name}</b></td>
@@ -4333,11 +4393,16 @@ export default function App() {
                 <td style="text-align:center;">${dayName(r.date)}</td>
                 <td style="text-align:center; font-weight: bold; color:#0284c7;">${r.status || 'استئذان رسمي'}</td>
                 <td style="text-align:center; font-family: monospace; font-weight: bold; color: ${r.tout?.text && r.tout.text !== '-' ? '#047857' : '#dc2626'};">${r.tout?.text && r.tout.text !== '-' ? r.tout.text : 'بدون بصمة'}</td>
+                <td style="text-align:center; font-weight: bold; color:#0f766e;">
+                  من ${dur.fromTime} إلى ${dur.toTime}
+                  <span style="display:block; font-size:11px; color:#b45309; margin-top:2px;">⏱️ ${dur.formattedText}</span>
+                </td>
                 <td style="text-align:center; color: ${r.tout?.text && r.tout.text !== '-' ? '#059669' : '#dc2626'}; font-weight:bold;">
                   ${r.tout?.text && r.tout.text !== '-' ? 'موثق ببصمة ✓' : '⚠️ بدون بصمة خروج'}
                 </td>
               </tr>
-            `).join('')}
+            `;
+            }).join('')}
           </tbody>
         </table>
 
@@ -4357,7 +4422,7 @@ export default function App() {
             window.focus();
             window.print();
           }
-        <\/script>
+        </script>
       </body>
       </html>
     `;
@@ -4411,11 +4476,14 @@ export default function App() {
               <th style="text-align:center;">اليوم</th>
               <th style="text-align:center;">نوع الاستئذان</th>
               <th style="text-align:center;">بصمة الانصراف</th>
+              <th style="text-align:center;">مدة الاستئذان</th>
               <th style="text-align:center;">حالة التوثيق</th>
             </tr>
           </thead>
           <tbody>
-            ${list.map((r, idx) => `
+            ${list.map((r, idx) => {
+              const dur = calculatePermissionDuration(r, config, permissionTimeOverrides[`${r.name}|${r.dateKey}`]);
+              return `
               <tr>
                 <td>${idx + 1}</td>
                 <td><b>${r.name}</b></td>
@@ -4424,9 +4492,11 @@ export default function App() {
                 <td style="text-align:center;">${dayName(r.date)}</td>
                 <td style="text-align:center;">${r.status || 'استئذان رسمي'}</td>
                 <td style="text-align:center; font-family: monospace;">${r.tout?.text && r.tout.text !== '-' ? r.tout.text : 'بدون بصمة'}</td>
+                <td style="text-align:center; font-weight: bold; color:#0f766e;">من ${dur.fromTime} إلى ${dur.toTime} (${dur.formattedText})</td>
                 <td style="text-align:center;">${r.tout?.text && r.tout.text !== '-' ? 'موثق ببصمة ✓' : '⚠️ بدون بصمة خروج'}</td>
               </tr>
-            `).join('')}
+            `;
+            }).join('')}
           </tbody>
         </table>
 
@@ -7542,6 +7612,70 @@ export default function App() {
                     </div>
                   )}
 
+                  {/* SUMMARY KPI CARDS FOR PERMISSIONS */}
+                  {(() => {
+                    const permList = filterDailyRecords(dailyRecords).filter(r => isEmergencyLeave(r.status) || r.checkout === 'استئذان بدون بصمة انصراف' || r.checkout === 'استئذان طارئ موثق (بصمة)');
+                    let totalPermMins = 0;
+                    let withExit = 0;
+                    let withoutExit = 0;
+
+                    permList.forEach(r => {
+                      const dur = calculatePermissionDuration(r, config, permissionTimeOverrides[`${r.name}|${r.dateKey}`]);
+                      totalPermMins += dur.minutes;
+                      if (r.tout && r.tout.total != null && r.tout.text !== '-') {
+                        withExit++;
+                      } else {
+                        withoutExit++;
+                      }
+                    });
+
+                    return (
+                      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                        <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-xs flex items-center justify-between">
+                          <div>
+                            <span className="text-xs font-bold text-slate-400">إجمالي حالات الاستئذان</span>
+                            <div className="text-2xl font-black text-slate-800 mt-1">{permList.length} <span className="text-xs font-normal text-slate-400">حالة</span></div>
+                          </div>
+                          <div className="w-10 h-10 rounded-xl bg-teal-50 text-teal-700 flex items-center justify-center font-bold text-lg">
+                            📋
+                          </div>
+                        </div>
+
+                        <div className="bg-white p-4 rounded-2xl border border-amber-200 shadow-xs flex items-center justify-between">
+                          <div>
+                            <span className="text-xs font-bold text-amber-800">إجمالي مدة الاستئذان</span>
+                            <div className="text-lg font-black text-amber-900 mt-1">
+                              {formatMinutesToHours(totalPermMins)}
+                            </div>
+                          </div>
+                          <div className="w-10 h-10 rounded-xl bg-amber-50 text-amber-700 flex items-center justify-center font-bold text-lg">
+                            ⏱️
+                          </div>
+                        </div>
+
+                        <div className="bg-white p-4 rounded-2xl border border-emerald-200 shadow-xs flex items-center justify-between">
+                          <div>
+                            <span className="text-xs font-bold text-emerald-800">موثق ببصمة خروج</span>
+                            <div className="text-2xl font-black text-emerald-600 mt-1">{withExit} <span className="text-xs font-normal text-slate-400">حالة</span></div>
+                          </div>
+                          <div className="w-10 h-10 rounded-xl bg-emerald-50 text-emerald-700 flex items-center justify-center font-bold text-lg">
+                            ✓
+                          </div>
+                        </div>
+
+                        <div className="bg-white p-4 rounded-2xl border border-rose-200 shadow-xs flex items-center justify-between">
+                          <div>
+                            <span className="text-xs font-bold text-rose-800">بدون بصمة انصراف</span>
+                            <div className="text-2xl font-black text-rose-600 mt-1">{withoutExit} <span className="text-xs font-normal text-slate-400">حالة</span></div>
+                          </div>
+                          <div className="w-10 h-10 rounded-xl bg-rose-50 text-rose-700 flex items-center justify-center font-bold text-lg">
+                            ⚠️
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })()}
+
                   {/* FILTERS PANEL */}
                   <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-xs flex flex-wrap items-center justify-between gap-4">
                     <div className="flex flex-wrap items-center gap-3">
@@ -7633,6 +7767,7 @@ export default function App() {
                             <th className="p-3 font-bold text-center">اليوم</th>
                             <th className="p-3 font-bold text-center">نوع الاستئذان</th>
                             <th className="p-3 font-bold text-center">بصمة الانصراف والتوثيق</th>
+                            <th className="p-3 font-bold text-center">مدة الاستئذان</th>
                             <th className="p-3 font-bold text-center">المراسلة والتنبيه</th>
                             <th className="p-3 font-bold text-center">نظام فارس</th>
                             <th className="p-3 font-bold text-center">تعديل الوقت</th>
@@ -7684,6 +7819,38 @@ export default function App() {
                                     ) : (
                                       <span className="text-slate-400 text-xs">معفى / إجازة رسمية</span>
                                     )}
+                                  </td>
+                                  <td className="p-3 text-center">
+                                    {(() => {
+                                      const dur = calculatePermissionDuration(r, config, permissionTimeOverrides[rKey]);
+                                      return (
+                                        <div className="inline-flex flex-col items-center">
+                                          <div className="text-xs font-bold text-slate-700 flex items-center gap-1.5" dir="rtl">
+                                            <span className="text-slate-400 font-semibold text-[11px]">من</span>
+                                            <span className="font-mono text-teal-800 bg-teal-50 px-1.5 py-0.5 rounded-md border border-teal-200/70 font-black text-xs">
+                                              {dur.fromTime}
+                                            </span>
+                                            <span className="text-slate-400 font-semibold text-[11px]">إلى</span>
+                                            <span className="font-mono text-slate-800 bg-slate-100 px-1.5 py-0.5 rounded-md border border-slate-200 font-black text-xs">
+                                              {dur.toTime}
+                                            </span>
+                                          </div>
+                                          <div className="mt-1 flex items-center gap-1">
+                                            <span className="bg-amber-100 text-amber-950 border border-amber-300 font-extrabold text-[11px] px-2.5 py-0.5 rounded-full shadow-2xs">
+                                              ⏱️ {dur.formattedText}
+                                            </span>
+                                            <button
+                                              type="button"
+                                              onClick={() => handleOpenPermissionTimeModal(r)}
+                                              className="p-1 text-slate-400 hover:text-teal-700 hover:bg-teal-50 rounded-md transition-all cursor-pointer"
+                                              title="تعديل وقت وفترة الاستئذان يدوياً"
+                                            >
+                                              <Edit className="w-3 h-3" />
+                                            </button>
+                                          </div>
+                                        </div>
+                                      );
+                                    })()}
                                   </td>
                                   <td className="p-3 text-center">
                                     <button
@@ -9458,6 +9625,107 @@ export default function App() {
                   <button
                     onClick={() => setEditingRecord(null)}
                     className="bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold px-4 py-2.5 rounded-xl text-xs transition-all border border-slate-200 text-center"
+                  >
+                    إلغاء
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* EDIT PERMISSION TIME MODAL */}
+        {editingPermissionRecord && (
+          <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 z-50 animate-fade-in" dir="rtl">
+            <div className="bg-white rounded-3xl max-w-md w-full overflow-hidden shadow-2xl border border-slate-200">
+              <div className="bg-gradient-to-r from-teal-800 to-teal-700 text-white p-5 flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className="bg-white/15 p-2 rounded-xl">
+                    <Clock className="w-5 h-5 text-amber-300" />
+                  </div>
+                  <div>
+                    <h3 className="font-extrabold text-base">تحديد وتعديل وقت الاستئذان</h3>
+                    <p className="text-xs text-teal-100 font-normal">{editingPermissionRecord.name} - {formatPrintDate(editingPermissionRecord.date)}</p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setEditingPermissionRecord(null)}
+                  className="p-1.5 hover:bg-white/10 rounded-xl text-teal-100 hover:text-white transition-all cursor-pointer"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              <div className="p-5 space-y-4">
+                <div className="bg-teal-50/60 border border-teal-200/60 rounded-2xl p-3.5 text-xs text-teal-950 leading-relaxed">
+                  يتم حساب مدة الاستئذان تلقائياً من وقت بداية الاستئذان إلى وقت نهاية الاستئذان. يمكنك تعديل الوقتين بدقة لحساب المدة بالدقائق والساعات.
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 mb-1.5">
+                      وقت بداية الاستئذان (من)
+                    </label>
+                    <input
+                      type="time"
+                      value={permissionModalFrom}
+                      onChange={(e) => setPermissionModalFrom(e.target.value)}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2.5 text-sm font-bold text-slate-800 outline-none focus:border-teal-600 transition-all font-sans"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 mb-1.5">
+                      وقت نهاية الاستئذان (إلى)
+                    </label>
+                    <input
+                      type="time"
+                      value={permissionModalTo}
+                      onChange={(e) => setPermissionModalTo(e.target.value)}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2.5 text-sm font-bold text-slate-800 outline-none focus:border-teal-600 transition-all font-sans"
+                    />
+                  </div>
+                </div>
+
+                {/* Live calculated duration indicator */}
+                {(() => {
+                  const tStart = parseTime(permissionModalFrom);
+                  const tEnd = parseTime(permissionModalTo);
+                  let diff = 0;
+                  if (tStart && tEnd && tStart.total != null && tEnd.total != null) {
+                    diff = Math.max(0, tEnd.total - tStart.total);
+                  }
+                  return (
+                    <div className="bg-amber-50 border border-amber-200 rounded-2xl p-3 text-center">
+                      <span className="text-xs font-bold text-amber-800 block mb-0.5">المدة المحسوبة للاستئذان:</span>
+                      <span className="text-xl font-black text-amber-950 font-mono">
+                        {formatMinutesToHours(diff)}
+                      </span>
+                    </div>
+                  );
+                })()}
+
+                <div className="flex gap-2.5 pt-3 border-t border-slate-100">
+                  <button
+                    type="button"
+                    onClick={handleSavePermissionTime}
+                    className="flex-1 bg-teal-700 hover:bg-teal-800 text-white font-bold py-2.5 rounded-xl text-xs shadow-sm transition-all text-center cursor-pointer"
+                  >
+                    حفظ وقت الاستئذان
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleResetPermissionTime}
+                    className="bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200 font-bold px-3 py-2.5 rounded-xl text-xs transition-all cursor-pointer"
+                    title="استعادة الحساب التلقائي للاستئذان بناء على البصمة ونهاية الدوام"
+                  >
+                    استعادة التلقائي
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setEditingPermissionRecord(null)}
+                    className="bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold px-4 py-2.5 rounded-xl text-xs transition-all border border-slate-200 text-center cursor-pointer"
                   >
                     إلغاء
                   </button>

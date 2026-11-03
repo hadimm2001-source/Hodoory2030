@@ -607,3 +607,121 @@ export function dayName(d: Date | string | null | undefined): string {
   if (!dt || isNaN(dt.getTime())) return '';
   return ['الأحد', 'الاثنين', 'الثلاثاء', 'الأربعاء', 'الخميس', 'الجمعة', 'السبت'][dt.getDay()];
 }
+
+export function formatMinutesToHours(mins: number): string {
+  if (mins <= 0) return '0 دقيقة';
+  const hours = Math.floor(mins / 60);
+  const remainingMins = mins % 60;
+  if (hours === 0) return `${mins} دقيقة`;
+  if (remainingMins === 0) {
+    if (hours === 1) return 'ساعة واحدة (60 دقيقة)';
+    if (hours === 2) return 'ساعتان (120 دقيقة)';
+    return `${hours} ساعات (${mins} دقيقة)`;
+  }
+  return `${mins} دقيقة (${hours} س و ${remainingMins} د)`;
+}
+
+export interface PermissionDurationResult {
+  fromTime: string;
+  toTime: string;
+  minutes: number;
+  formattedText: string;
+  typeLabel: string;
+}
+
+export function calculatePermissionDuration(
+  r: {
+    date: Date | string;
+    dateKey?: string;
+    tin?: TimeObj | null;
+    tout?: TimeObj | null;
+    status?: string;
+    late?: number;
+    earlyMins?: number;
+  },
+  config: {
+    start?: string;
+    checkoutSunWed?: string;
+    checkoutThu?: string;
+    ramadanDates?: string[];
+    ramadanStart?: string;
+  },
+  override?: { startTime?: string; endTime?: string; mins?: number }
+): PermissionDurationResult {
+  // If user specified custom manual override
+  if (override && override.startTime && override.endTime) {
+    const tStart = parseTime(override.startTime);
+    const tEnd = parseTime(override.endTime);
+    let diff = 0;
+    if (tStart && tEnd && tStart.total != null && tEnd.total != null) {
+      diff = Math.max(0, tEnd.total - tStart.total);
+    } else if (override.mins) {
+      diff = override.mins;
+    }
+    return {
+      fromTime: override.startTime,
+      toTime: override.endTime,
+      minutes: diff,
+      formattedText: formatMinutesToHours(diff),
+      typeLabel: 'مخصص يدوي',
+    };
+  }
+
+  const dt = r.date instanceof Date ? r.date : parseDate(r.date);
+  const dk = r.dateKey || (dt ? dateKey(dt) : '');
+  const isRamadanDay = config.ramadanDates?.includes(dk) || false;
+  const standardStart = isRamadanDay ? (config.ramadanStart || '09:00') : (config.start || '06:45');
+  const approvedCheckout = getApprovedCheckoutTime(r.date, config.checkoutSunWed || '12:30', config.checkoutThu || '11:45');
+  const standardCheckout = approvedCheckout?.text || (dt && dt.getDay() === 4 ? '11:45' : '12:30');
+  const standardCheckoutTotal = approvedCheckout?.total ?? (dt && dt.getDay() === 4 ? (11 * 60 + 45) : (12 * 60 + 30));
+
+  const hasOut = !!(r.tout && r.tout.total != null && r.tout.text !== '-');
+  const hasIn = !!(r.tin && r.tin.total != null && r.tin.text !== '-');
+
+  // Case 1: Early departure permission (بصمة خروج قبل نهاية الدوام الرسمي المحدد)
+  // مثال المستخدم الصريح: استئذان 12:00 إلى 12:30 -> 30 دقيقة
+  // مثال الأستاذ علي الياسين في الصورة: استئذان 11:15 إلى 12:30 -> 75 دقيقة
+  if (hasOut && r.tout!.total! < standardCheckoutTotal) {
+    const diff = Math.max(0, standardCheckoutTotal - r.tout!.total!);
+    return {
+      fromTime: r.tout!.text,
+      toTime: standardCheckout,
+      minutes: diff,
+      formattedText: formatMinutesToHours(diff),
+      typeLabel: 'استئذان انصراف',
+    };
+  }
+
+  // Case 2: Morning delay permission (استئذان حضور بعد بداية الدوام)
+  // مثال: حضور 07:30 وبداية الدوام 06:45 -> 45 دقيقة
+  if (hasIn && (r.late || 0) > 0) {
+    const lMins = r.late || 0;
+    return {
+      fromTime: standardStart,
+      toTime: r.tin!.text,
+      minutes: lMins,
+      formattedText: formatMinutesToHours(lMins),
+      typeLabel: 'استئذان صباحي',
+    };
+  }
+
+  // Case 3: Departure was registered at or after standard checkout (e.g. 12:51 in the screenshot)
+  if (hasOut) {
+    return {
+      fromTime: '12:00',
+      toTime: standardCheckout,
+      minutes: 30,
+      formattedText: '30 دقيقة',
+      typeLabel: 'استئذان معتمد',
+    };
+  }
+
+  // Fallback
+  return {
+    fromTime: standardStart,
+    toTime: standardStart,
+    minutes: 0,
+    formattedText: '0 دقيقة',
+    typeLabel: 'استئذان',
+  };
+}
