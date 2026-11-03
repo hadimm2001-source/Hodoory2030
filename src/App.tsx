@@ -25,12 +25,18 @@ import {
   AlertTriangle,
   Edit,
   FileSpreadsheet,
-  LogOut
+  LogOut,
+  HeartPulse,
+  CalendarCheck,
+  Send,
+  Stethoscope
 } from 'lucide-react';
 
 import {
   BarChart,
   Bar,
+  PieChart,
+  Pie,
   XAxis,
   YAxis,
   CartesianGrid,
@@ -101,6 +107,7 @@ const LOCAL_STORAGE_KEYS = {
   FARES_SUBMITTED: 'jashah_fares_submitted_v1',
   MESSAGE_LOG: 'jashah_message_log_v1',
   IMPORT_STATS: 'jashah_import_stats_v1',
+  LEAVE_CLASSIFICATIONS: 'jashah_leave_classifications_v1',
 };
 
 interface CustomTooltipProps {
@@ -192,6 +199,16 @@ export default function App() {
     return saved ? JSON.parse(saved) : null;
   });
 
+  // Track teacher leave classifications (Sick with medical excuse vs Emergency 5 days max)
+  const [leaveClassifications, setLeaveClassifications] = useState<Record<string, 'sick' | 'emergency' | 'unspecified'>>(() => {
+    const saved = localStorage.getItem(LOCAL_STORAGE_KEYS.LEAVE_CLASSIFICATIONS);
+    return saved ? JSON.parse(saved) : {};
+  });
+
+  useEffect(() => {
+    localStorage.setItem(LOCAL_STORAGE_KEYS.LEAVE_CLASSIFICATIONS, JSON.stringify(leaveClassifications));
+  }, [leaveClassifications]);
+
   // UI Navigation / Filter state
   const [currentTab, setCurrentTab] = useState<string>('dashboard');
   const [selectedMonth, setSelectedMonth] = useState<string>('all');
@@ -203,6 +220,15 @@ export default function App() {
   const [searchTerm, setSearchTerm] = useState<string>('');
   const [excuseSubFilter, setExcuseSubFilter] = useState<'all' | 'leaves' | 'emergency_all' | 'emergency_no_exit' | 'emergency_with_exit'>('all');
   const [earlyFilterType, setEarlyFilterType] = useState<'accountable' | 'early_only' | 'wrong_time' | 'exempt' | 'all'>('accountable');
+  const [leaveFilterType, setLeaveFilterType] = useState<'all' | 'sick' | 'emergency' | 'pending' | 'submitted' | 'warning_limit'>('all');
+
+  // Manual Leave Registration modal state
+  const [isAddLeaveModalOpen, setIsAddLeaveModalOpen] = useState(false);
+  const [leaveModalTeacher, setLeaveModalTeacher] = useState<string>('');
+  const [leaveModalDate, setLeaveModalDate] = useState<string>(() => new Date().toISOString().split('T')[0]);
+  const [leaveModalType, setLeaveModalType] = useState<'sick' | 'emergency'>('sick');
+  const [leaveModalFaresSubmitted, setLeaveModalFaresSubmitted] = useState<boolean>(false);
+  const [leaveModalNotes, setLeaveModalNotes] = useState<string>('');
 
   // Monthly Report interactive selections
   const [monthlyEmployee, setMonthlyEmployee] = useState<string>('all');
@@ -1204,8 +1230,10 @@ export default function App() {
     return Array.from(new Set(dailyRecords.map(r => r.month))).sort();
   };
 
-  const getEmployeesNames = () => {
-    return Array.from(new Set(dailyRecords.map(r => r.name))).sort((a: string, b: string) =>
+  const getEmployeesNames = (): string[] => {
+    const fromDaily = dailyRecords.map(r => r.name);
+    const fromEmps = employees.map(e => e.name);
+    return Array.from(new Set<string>([...fromDaily, ...fromEmps].filter(Boolean))).sort((a: string, b: string) =>
       a.localeCompare(b, 'ar')
     );
   };
@@ -1664,17 +1692,6 @@ export default function App() {
 
   const stats = getDisciplineStats();
 
-  // Dynamic calculations for Leaves & Excuses (Annual vs Emergency)
-  const dashboardLeaves = filterDailyRecords(dailyRecords).filter(r => r.type === 'excuse');
-  const dashboardAnnualCount = dashboardLeaves.filter(r => {
-    const s = r.status || '';
-    return s.includes('سنوية') || s.includes('سنويه') || s.includes('اعتياد');
-  }).length;
-  const dashboardEmergencyCount = dashboardLeaves.filter(r => {
-    const s = r.status || '';
-    return s.includes('طارئ') || s.includes('اضطرار');
-  }).length;
-
   const isExcludedDay = (d: any) => {
     const dk = dateKey(d);
     return isWeekend(d, config.weekend) || 
@@ -1682,6 +1699,208 @@ export default function App() {
       (config.suspendedDates || []).includes(dk) ||
       autoDetectedSuspendedDays.includes(dk);
   };
+
+  // Helper to determine whether a record is classified as 'sick' (مع عذر طبي), 'emergency' (اضطرارية 5 أيام), or 'unspecified'
+  const getRecordLeaveType = (r: ParsedRow): 'sick' | 'emergency' | 'unspecified' => {
+    const rKey = `${r.name}|${r.dateKey}`;
+    if (leaveClassifications[rKey]) {
+      return leaveClassifications[rKey];
+    }
+    const s = r.status || '';
+    const norm = normKey(s);
+    if (norm.includes('مرض') || norm.includes('طبي') || norm.includes('مرضية') || norm.includes('عذر طبي') || norm.includes('تقرير')) {
+      return 'sick';
+    }
+    if (norm.includes('اضطرار') || norm.includes('طارئ') || norm.includes('اضطرارية')) {
+      return 'emergency';
+    }
+    return 'unspecified';
+  };
+
+  const setRecordLeaveClassification = (recordKey: string, type: 'sick' | 'emergency' | 'unspecified') => {
+    setLeaveClassifications(prev => ({
+      ...prev,
+      [recordKey]: type
+    }));
+  };
+
+  // Compute emergency leave days for a specific teacher (capped strictly at 5 days per school year)
+  const getTeacherEmergencyDays = (teacherName: string): ParsedRow[] => {
+    return dailyRecords.filter(r => {
+      if (r.name !== teacherName) return false;
+      if (isExcludedDay(r.date)) return false;
+      const rKey = `${r.name}|${r.dateKey}`;
+      const manual = leaveClassifications[rKey];
+      if (manual === 'emergency') return true;
+      if (manual === 'sick' || manual === 'unspecified') return false;
+      const s = r.status || '';
+      const norm = normKey(s);
+      return (norm.includes('اضطرار') || norm.includes('طارئ') || norm.includes('اضطرارية')) && (r.type === 'excuse' || r.type === 'absence');
+    });
+  };
+
+  // Compute sick leave days for a specific teacher (according to certified medical report)
+  const getTeacherSickDays = (teacherName: string): ParsedRow[] => {
+    return dailyRecords.filter(r => {
+      if (r.name !== teacherName) return false;
+      if (isExcludedDay(r.date)) return false;
+      const rKey = `${r.name}|${r.dateKey}`;
+      const manual = leaveClassifications[rKey];
+      if (manual === 'sick') return true;
+      if (manual === 'emergency' || manual === 'unspecified') return false;
+      const s = r.status || '';
+      const norm = normKey(s);
+      return (norm.includes('مرض') || norm.includes('طبي') || norm.includes('عذر طبي')) && (r.type === 'excuse' || r.type === 'absence');
+    });
+  };
+
+  // All eligible leave records (both excused and unexcused absences requiring Fares submission)
+  const getLeavesList = () => {
+    return filterDailyRecords(dailyRecords).filter(r => {
+      if (isExcludedDay(r.date)) return false;
+      const rKey = `${r.name}|${r.dateKey}`;
+      const hasClassification = !!leaveClassifications[rKey];
+      const isExcuse = r.type === 'excuse';
+      const isAbsence = r.type === 'absence';
+      const s = r.status || '';
+      const norm = normKey(s);
+      const isMentioned = norm.includes('إجازة') || norm.includes('اجازة') || norm.includes('مرض') || norm.includes('طبي') || norm.includes('اضطرار') || norm.includes('عذر');
+
+      return hasClassification || isExcuse || isAbsence || isMentioned;
+    });
+  };
+
+  // Compute all leaves across entire school for the active period (independent of individual teacher filter)
+  const getAllSchoolLeavesInPeriod = () => {
+    return dailyRecords.filter(r => {
+      if (isExcludedDay(r.date)) return false;
+      let matchPeriod = true;
+      if (selectedPeriodType === 'range') {
+        const dk = dateKey(r.date);
+        const matchStart = !selectedStartDate || dk >= selectedStartDate;
+        const matchEnd = !selectedEndDate || dk <= selectedEndDate;
+        matchPeriod = matchStart && matchEnd;
+      } else {
+        matchPeriod = selectedMonth === 'all' || r.month === selectedMonth;
+      }
+      if (!matchPeriod) return false;
+
+      const rKey = `${r.name}|${r.dateKey}`;
+      const hasClassification = !!leaveClassifications[rKey];
+      const isExcuse = r.type === 'excuse';
+      const isAbsence = r.type === 'absence';
+      const s = r.status || '';
+      const norm = normKey(s);
+      const isMentioned = norm.includes('إجازة') || norm.includes('اجازة') || norm.includes('مرض') || norm.includes('طبي') || norm.includes('اضطرار') || norm.includes('عذر');
+
+      return hasClassification || isExcuse || isAbsence || isMentioned;
+    });
+  };
+
+  const handleOpenAddLeaveModal = (teacherName?: string) => {
+    const list = getEmployeesNames();
+    if (teacherName && teacherName !== 'all') {
+      setLeaveModalTeacher(teacherName);
+    } else if (selectedEmployee !== 'all') {
+      setLeaveModalTeacher(selectedEmployee);
+    } else {
+      setLeaveModalTeacher(list[0] || '');
+    }
+    setLeaveModalDate(new Date().toISOString().split('T')[0]);
+    setLeaveModalType('sick');
+    setLeaveModalFaresSubmitted(false);
+    setLeaveModalNotes('');
+    setIsAddLeaveModalOpen(true);
+  };
+
+  const handleSaveNewLeave = (andSendWhatsApp: boolean = false) => {
+    if (!leaveModalTeacher) {
+      alert('الرجاء اختيار اسم المعلم أولاً.');
+      return;
+    }
+    if (!leaveModalDate) {
+      alert('الرجاء اختيار تاريخ الإجازة.');
+      return;
+    }
+
+    const d = parseDate(leaveModalDate) || new Date(leaveModalDate);
+    const dk = dateKey(d);
+    const mk = monthKey(d);
+    const rKey = `${leaveModalTeacher}|${dk}`;
+
+    if (leaveModalType === 'emergency') {
+      const existingEmergencyDays = getTeacherEmergencyDays(leaveModalTeacher);
+      const isAlreadyCounted = existingEmergencyDays.some(r => (r.dateKey || dateKey(r.date)) === dk);
+      if (!isAlreadyCounted && existingEmergencyDays.length >= 5) {
+        alert(`تنبيه نظامي: المعلم / ${leaveModalTeacher} استنفد الحد الأقصى للإجازة الاضطرارية (5 أيام من أصل 5). النظام لا يسمح بتسجيل أكثر من 5 أيام اضطرارية في العام الدراسي.`);
+        return;
+      }
+    }
+
+    const empInfo = employees.find(e => e.name === leaveModalTeacher) || { job: 'معلم ممارس', civil: '' };
+    const leaveLabel = leaveModalType === 'sick'
+      ? (leaveModalNotes.trim() ? `إجازة مرضية (${leaveModalNotes.trim()})` : 'إجازة مرضية')
+      : (leaveModalNotes.trim() ? `إجازة اضطرارية (${leaveModalNotes.trim()})` : 'إجازة اضطرارية');
+
+    const updatedRows = [...rawRows];
+    const existingIdx = updatedRows.findIndex(r => r.name === leaveModalTeacher && (r.dateKey === dk || dateKey(r.date) === dk));
+
+    const newRecord: any = {
+      name: leaveModalTeacher,
+      job: empInfo.job,
+      civil: empInfo.civil,
+      date: d instanceof Date ? d.toISOString() : d,
+      dateKey: dk,
+      month: mk,
+      tin: null,
+      tout: null,
+      type: leaveModalFaresSubmitted ? 'excuse' : 'absence',
+      status: leaveLabel,
+      expected: null,
+      checkout: '',
+      earlyMins: 0,
+      late: 0,
+    };
+
+    if (existingIdx > -1) {
+      updatedRows[existingIdx] = {
+        ...updatedRows[existingIdx],
+        ...newRecord,
+      };
+    } else {
+      updatedRows.push(newRecord);
+    }
+
+    setRawRows(updatedRows);
+
+    setLeaveClassifications(prev => ({
+      ...prev,
+      [rKey]: leaveModalType
+    }));
+
+    setFaresSubmitted(prev => ({
+      ...prev,
+      [rKey]: leaveModalFaresSubmitted
+    }));
+
+    setIsAddLeaveModalOpen(false);
+
+    if (andSendWhatsApp) {
+      setTimeout(() => {
+        handleDemandFaresWhatsApp(newRecord, leaveModalType);
+      }, 300);
+    }
+  };
+
+  // Dynamic calculations for Leaves & Excuses (Sick vs Emergency)
+  const allFilteredLeaves = getLeavesList();
+  const dashboardSickCount = allFilteredLeaves.filter(r => getRecordLeaveType(r) === 'sick').length;
+  const dashboardEmergencyCount = allFilteredLeaves.filter(r => getRecordLeaveType(r) === 'emergency').length;
+  const dashboardAnnualCount = allFilteredLeaves.filter(r => {
+    const s = r.status || '';
+    return s.includes('سنوية') || s.includes('سنويه') || s.includes('اعتياد');
+  }).length;
+  const totalPendingFaresLeavesCount = allFilteredLeaves.filter(r => !faresSubmitted[`${r.name}|${r.dateKey}`]).length;
 
   // Calculations for Absence Tab Statistics
   const allSchoolAbsences = dailyRecords.filter(r => {
@@ -3435,6 +3654,285 @@ export default function App() {
     URL.revokeObjectURL(url);
   };
 
+  const handleDemandFaresWhatsApp = (r: ParsedRow, specificType?: 'sick' | 'emergency') => {
+    const rKey = `${r.name}|${r.dateKey}`;
+    const effectiveType = specificType || getRecordLeaveType(r);
+    const dName = dayName(r.date);
+    const dStr = formatPrintDate(r.date);
+    const usedEmergency = getTeacherEmergencyDays(r.name).length;
+    const remainingEmergency = Math.max(0, 5 - usedEmergency);
+
+    let text = '';
+    if (effectiveType === 'sick') {
+      text = `السلام عليكم ورحمة الله وبركاته\n\nالأستاذ الموقر: ${r.name}\n\nنود إحاطتكم بأنه تم رصد عدم حضوركم ليوم ${dName} الموافق ${dStr} كـ (إجازة مرضية بعذر طبي).\n\nنأمل منكم التكرم بسرعة رفع التقرير الطبي وطلب الإجازة المرضية في نظام فارس حتى يتم اعتمادها رسمياً من قبل مدير المدرسة، وتفادي احتساب الغياب بدون عذر أو الحسم المالي.\n\nشاكرين ومقدرين لكم سرعة المبادرة بالرفع والتعاون الدائم.\n— إدارة مدرسة الجشة المتوسطة`;
+    } else if (effectiveType === 'emergency') {
+      text = `السلام عليكم ورحمة الله وبركاته\n\nالأستاذ الموقر: ${r.name}\n\nنود إحاطتكم بأنه تم رصد غيابكم ليوم ${dName} الموافق ${dStr} كـ (إجازة اضطرارية).\n\nنرجو منكم التكرم بسرعة المبادرة برفع طلب الإجازة الاضطرارية عبر نظام فارس لاعتمادها رسمياً من قبل مدير المدرسة.\n\nعلماً بأن رصيدكم المستخدم من الإجازة الاضطرارية حتى الآن: (${usedEmergency} من أصل 5 أيام مسموحة نظاماً)، والرصيد المتبقي لكم هو: (${remainingEmergency} أيام).\n\nشاكرين لكم سرعة المبادرة بالرفع.\n— إدارة مدرسة الجشة المتوسطة`;
+    } else {
+      text = `السلام عليكم ورحمة الله وبركاته\n\nالأستاذ الموقر: ${r.name}\n\nنحيطكم علماً برصد عدم حضوركم ليوم ${dName} الموافق ${dStr}.\n\nنرجو منكم سرعة إفادة إدارة المدرسة بنوع الإجازة (إجازة مرضية بتقرير طبي / أو إجازة اضطرارية من رصيد الـ 5 أيام)، والمبادرة برفع الطلب في نظام فارس لاعتماده رسمياً وتفادي احتساب الغياب بدون عذر.\n\nشاكرين لكم حسن تعاونكم.\n— إدارة مدرسة الجشة المتوسطة`;
+    }
+
+    setModalActiveRecordKey(rKey);
+    setModalTitle(`مطالبة بالرفع في نظام فارس - الأستاذ / ${r.name}`);
+    setModalText(text);
+    setModalOpen(true);
+  };
+
+  const handlePrintLeavesList = () => {
+    const list = getLeavesList().filter(r => {
+      const lType = getRecordLeaveType(r);
+      const isSubmitted = !!faresSubmitted[`${r.name}|${r.dateKey}`];
+      const usedEm = getTeacherEmergencyDays(r.name).length;
+
+      if (leaveFilterType === 'sick') return lType === 'sick';
+      if (leaveFilterType === 'emergency') return lType === 'emergency';
+      if (leaveFilterType === 'pending') return !isSubmitted;
+      if (leaveFilterType === 'submitted') return isSubmitted;
+      if (leaveFilterType === 'warning_limit') return usedEm >= 4;
+      return true;
+    }).sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+
+    const targetTeacher = selectedEmployee !== 'all' 
+      ? selectedEmployee 
+      : (Array.from(new Set(list.map(r => r.name))).length === 1 
+          ? Array.from(new Set(list.map(r => r.name)))[0] 
+          : '');
+
+    const printWindow = window.open('', '_blank', 'width=1000,height=800');
+    if (!printWindow) {
+      alert('الرجاء السماح بالنوافذ المنبثقة للطباعة.');
+      return;
+    }
+
+    const printHtml = `
+      <!doctype html>
+      <html lang="ar" dir="rtl">
+      <head>
+        <meta charset="utf-8">
+        <title>كشف رصد ومتابعة الإجازات (المرضية والاضطرارية) - مدرسة الجشة المتوسطة</title>
+        <style>
+          @import url('https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800&display=swap');
+          body {
+            font-family: 'Tajawal', sans-serif;
+            color: #1e293b;
+            margin: 40px;
+            direction: rtl;
+            text-align: right;
+            line-height: 1.6;
+          }
+          .report-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 3px solid #0d9488;
+            padding-bottom: 20px;
+            margin-bottom: 25px;
+          }
+          .school-info { font-size: 14px; font-weight: bold; }
+          .report-title { text-align: center; font-size: 22px; color: #0f766e; font-weight: 800; }
+          .notice-box {
+            background-color: #f0fdfa;
+            border: 1px solid #99f6e4;
+            border-radius: 8px;
+            padding: 12px;
+            margin-bottom: 20px;
+            font-size: 12px;
+            font-weight: bold;
+            color: #115e59;
+          }
+          table { width: 100%; border-collapse: collapse; margin-bottom: 30px; font-size: 12px; }
+          th, td { border: 1px solid #cbd5e1; padding: 10px; text-align: right; }
+          th { background-color: #ccfbf1; color: #0f766e; font-weight: bold; }
+        </style>
+      </head>
+      <body>
+        <div class="report-header">
+          <div class="school-info">
+            وزارة التعليم<br>
+            إدارة التعليم بالأحساء<br>
+            مدرسة الجشة المتوسطة
+          </div>
+          <div class="report-title">كشف رصد ومتابعة الإجازات (المرضية والاضطرارية)</div>
+          <div class="school-info" style="text-align: left;">
+            التاريخ: ${new Date().toLocaleDateString('ar-SA')}م (${toHijri(new Date())})<br>
+          </div>
+        </div>
+
+        <div class="notice-box">
+          ضوابط الإجازات: 1- الإجازة المرضية تكون وفق عذر طبي معتمد. | 2- الإجازة الاضطرارية محددة بـ 5 أيام فقط نظاماً في العام الدراسي. | يلزم المعلم برفع الإجازة في نظام فارس لاعتمادها من مدير المدرسة.
+        </div>
+
+        <table>
+          <thead>
+            <tr>
+              <th style="text-align:center;">#</th>
+              <th>اسم المعلم / الموظف</th>
+              <th>المسمى الوظيفي</th>
+              <th style="text-align:center;">التاريخ</th>
+              <th style="text-align:center;">اليوم</th>
+              <th style="text-align:center;">نوع الإجازة والمسوغ</th>
+              <th style="text-align:center;">رصيد الاضطرارية</th>
+              <th style="text-align:center;">موقف الاعتماد في فارس</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${list.map((r, idx) => {
+              const lType = getRecordLeaveType(r);
+              const isSubmitted = !!faresSubmitted[`${r.name}|${r.dateKey}`];
+              const usedEm = getTeacherEmergencyDays(r.name).length;
+              return `
+                <tr>
+                  <td style="text-align:center;">${idx + 1}</td>
+                  <td><b>${r.name}</b></td>
+                  <td>${r.job || '-'}</td>
+                  <td style="text-align:center;">${formatPrintDate(r.date)}</td>
+                  <td style="text-align:center;">${dayName(r.date)}</td>
+                  <td style="text-align:center; font-weight:bold; color:${lType === 'sick' ? '#0284c7' : lType === 'emergency' ? '#d97706' : '#64748b'};">
+                    ${lType === 'sick' ? '🏥 إجازة مرضية (عذر طبي)' : lType === 'emergency' ? '⚡ إجازة اضطرارية (5 أيام)' : '⏳ غير محددة (معلقة)'}
+                  </td>
+                  <td style="text-align:center; font-weight:bold;">
+                    ${lType === 'emergency' ? `${usedEm} / 5 أيام` : '-'}
+                  </td>
+                  <td style="text-align:center; font-weight:bold; color:${isSubmitted ? '#059669' : '#e11d48'};">
+                    ${isSubmitted ? '✓ معتمد في فارس' : '⏳ بانتظار الرفع في فارس'}
+                  </td>
+                </tr>
+              `;
+            }).join('')}
+          </tbody>
+        </table>
+
+        <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-top: 45px; font-weight:bold; font-size:13px;">
+          <div style="text-align: right; min-width: 260px;">
+            <div>المعلم / الموظف: ${targetTeacher || '...........................................'}</div>
+            <div style="margin-top: 18px;">التوقيع: ............................................</div>
+          </div>
+          <div style="text-align: left; min-width: 260px;">
+            <div>مدير المدرسة: ............................................</div>
+            <div style="margin-top: 18px;">التوقيع: ............................................</div>
+          </div>
+        </div>
+
+        <script>
+          window.onload = function() {
+            window.focus();
+            window.print();
+          }
+        <\/script>
+      </body>
+      </html>
+    `;
+
+    printWindow.document.open();
+    printWindow.document.write(printHtml);
+    printWindow.document.close();
+  };
+
+  const handleExportLeavesListWord = () => {
+    const list = getLeavesList().filter(r => {
+      const lType = getRecordLeaveType(r);
+      const isSubmitted = !!faresSubmitted[`${r.name}|${r.dateKey}`];
+      const usedEm = getTeacherEmergencyDays(r.name).length;
+
+      if (leaveFilterType === 'sick') return lType === 'sick';
+      if (leaveFilterType === 'emergency') return lType === 'emergency';
+      if (leaveFilterType === 'pending') return !isSubmitted;
+      if (leaveFilterType === 'submitted') return isSubmitted;
+      if (leaveFilterType === 'warning_limit') return usedEm >= 4;
+      return true;
+    }).sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+
+    const targetTeacher = selectedEmployee !== 'all' 
+      ? selectedEmployee 
+      : (Array.from(new Set(list.map(r => r.name))).length === 1 
+          ? Array.from(new Set(list.map(r => r.name)))[0] 
+          : '');
+
+    const wordHtml = `
+      <html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'>
+      <head>
+        <title>كشف رصد ومتابعة الإجازات (المرضية والاضطرارية)</title>
+        <style>
+          body { font-family: 'Arial', sans-serif; direction: rtl; text-align: right; }
+          .header { border-bottom: 2px solid #0d9488; padding-bottom: 10px; margin-bottom: 20px; }
+          .table { width: 100%; border-collapse: collapse; margin-top: 15px; }
+          .table th, .table td { border: 1px solid #999; padding: 8px; text-align: right; font-size: 11pt; }
+          .table th { background-color: #0d9488; color: #ffffff; }
+        </style>
+      </head>
+      <body>
+        <div class="header">
+          <h2>مدرسة الجشة المتوسطة - إدارة التعليم بالأحساء</h2>
+          <h3>كشف رصد ومتابعة الإجازات (المرضية والاضطرارية) (إجمالي السجلات: ${list.length})</h3>
+          <p>
+            ${selectedMonth === 'all' ? 'الفترة: كامل الفصل الدراسي' : `الشهر: ${selectedMonth}`}
+            | تاريخ التصدير: ${new Date().toLocaleDateString('ar-SA')}م (${toHijri(new Date())})
+          </p>
+          <p style="color:#0f766e; font-weight:bold;">
+            ملاحظة: الإجازة المرضية تتطلب تقريراً طبياً معتمداً، والإجازة الاضطرارية محددة بـ 5 أيام فقط نظاماً في العام الدراسي.
+          </p>
+        </div>
+
+        <table class="table">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>اسم المعلم / الموظف</th>
+              <th>المسمى الوظيفي</th>
+              <th style="text-align:center;">التاريخ</th>
+              <th style="text-align:center;">اليوم</th>
+              <th style="text-align:center;">نوع الإجازة والمسوغ</th>
+              <th style="text-align:center;">رصيد الاضطرارية</th>
+              <th style="text-align:center;">الموقف في فارس</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${list.map((r, idx) => {
+              const lType = getRecordLeaveType(r);
+              const isSubmitted = !!faresSubmitted[`${r.name}|${r.dateKey}`];
+              const usedEm = getTeacherEmergencyDays(r.name).length;
+              return `
+                <tr>
+                  <td>${idx + 1}</td>
+                  <td><b>${r.name}</b></td>
+                  <td>${r.job || '-'}</td>
+                  <td style="text-align:center;">${formatWordDate(r.date)}</td>
+                  <td style="text-align:center;">${dayName(r.date)}</td>
+                  <td style="text-align:center;">${lType === 'sick' ? 'إجازة مرضية (عذر طبي)' : lType === 'emergency' ? 'إجازة اضطرارية (5 أيام)' : 'معلقة بانتظار التحديد'}</td>
+                  <td style="text-align:center;">${lType === 'emergency' ? `${usedEm} / 5 أيام` : '-'}</td>
+                  <td style="text-align:center;">${isSubmitted ? 'معتمد في فارس' : 'بانتظار الرفع في فارس'}</td>
+                </tr>
+              `;
+            }).join('')}
+          </tbody>
+        </table>
+
+        <div style="margin-top: 40px; font-size: 13px; font-weight: bold;">
+          <table style="width: 100%; border: none;">
+            <tr>
+              <td style="border: none; text-align: right; width: 50%;">
+                المعلم / الموظف: ${targetTeacher || '...........................................'}<br><br>
+                التوقيع: ............................................
+              </td>
+              <td style="border: none; text-align: left; width: 50%;">
+                مدير المدرسة: ............................................<br><br>
+                التوقيع: ............................................
+              </td>
+            </tr>
+          </table>
+        </div>
+      </body>
+      </html>
+    `;
+
+    const blob = new Blob(['\ufeff' + wordHtml], { type: 'application/msword' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `كشف_الإجازات_المرضية_والاضطرارية_${(selectedMonth === 'all' ? 'كامل' : selectedMonth).replace(/\s+/g, '_')}.doc`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
   const handlePrintAbsenceList = () => {
     const list = filterDailyRecords(dailyRecords)
       .filter(r => r.type === 'absence')
@@ -3695,7 +4193,7 @@ export default function App() {
 
   const handlePrintExcusesList = () => {
     const list = filterDailyRecords(dailyRecords)
-      .filter(r => r.type === 'excuse')
+      .filter(r => isEmergencyLeave(r.status) || r.checkout === 'استئذان بدون بصمة انصراف' || r.checkout === 'استئذان طارئ موثق (بصمة)')
       .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
     const printWindow = window.open('', '_blank', 'width=1000,height=800');
     if (!printWindow) {
@@ -3708,7 +4206,7 @@ export default function App() {
       <html lang="ar" dir="rtl">
       <head>
         <meta charset="utf-8">
-        <title>كشف الغياب بعذر والأعذار المعتمدة - مدرسة الجشة المتوسطة</title>
+        <title>كشف الاستئذانات الرسمية وتوثيق بصمة الخروج - مدرسة الجشة المتوسطة</title>
         <style>
           @import url('https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800&display=swap');
           body {
@@ -3785,7 +4283,7 @@ export default function App() {
             إدارة التعليم بالأحساء<br>
             مدرسة الجشة المتوسطة
           </div>
-          <div class="report-title">كشف الغياب بعذر والأعذار المعتمدة</div>
+          <div class="report-title">كشف الاستئذانات الرسمية وتوثيق بصمة الخروج</div>
           <div class="school-info" style="text-align: left;">
             التاريخ: ${new Date().toLocaleDateString('ar-SA')}م (${toHijri(new Date())})<br>
           </div>
@@ -3794,12 +4292,15 @@ export default function App() {
         <div style="background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 12px; margin-bottom: 20px; font-size:13px; font-weight: bold; color: #0284c7;">
           ${selectedMonth === 'all' ? 'الفترة المستهدفة: كامل الفصل الدراسي / كل الأشهر' : `الشهر المستهدف: ${selectedMonth}`}
           ${selectedEmployee !== 'all' ? ` | الموظف: ${selectedEmployee}` : ''}
+          <div style="font-size: 11px; font-weight: normal; color: #64748b; margin-top: 4px;">
+            تنبيه: الاستئذان لا يعد غياباً لكون المعلم قد باشر الحضور والعمل بالمدرسة، ويقتصر هذا الكشف على رصد الاستئذان وبصمة الخروج.
+          </div>
         </div>
 
         <div class="summary-cards">
           <div class="card">
             <div class="card-num">${list.length}</div>
-            <div class="card-lbl">إجمالي أيام الغياب المبرر والإجازات المعتمدة</div>
+            <div class="card-lbl">إجمالي حالات الاستئذان الرسمية المسجلة</div>
           </div>
         </div>
 
@@ -3809,17 +4310,18 @@ export default function App() {
               <th style="width: 5%; text-align:center;">#</th>
               <th>اسم المعلم / الموظف</th>
               <th>المسمى الوظيفي</th>
-              <th style="text-align:center;">تاريخ العذر</th>
+              <th style="text-align:center;">تاريخ الاستئذان</th>
               <th style="text-align:center;">اليوم</th>
-              <th style="text-align:center;">نوع الإجازة / العذر</th>
-              <th style="text-align:center;">حالة الاعتماد</th>
+              <th style="text-align:center;">نوع الاستئذان</th>
+              <th style="text-align:center;">بصمة الانصراف</th>
+              <th style="text-align:center;">حالة التوثيق</th>
             </tr>
           </thead>
           <tbody>
             ${list.length === 0 ? `
               <tr>
-                <td colspan="7" style="text-align:center; padding: 20px; color: #64748b; font-weight:bold;">
-                  لا توجد أي أعذار أو إجازات مسجلة خلال الفترة
+                <td colspan="8" style="text-align:center; padding: 20px; color: #64748b; font-weight:bold;">
+                  لا توجد أي حالات استئذان مسجلة خلال هذه الفترة
                 </td>
               </tr>
             ` : list.map((r, idx) => `
@@ -3829,8 +4331,11 @@ export default function App() {
                 <td>${r.job || '-'}</td>
                 <td style="text-align:center;">${formatPrintDate(r.date)}</td>
                 <td style="text-align:center;">${dayName(r.date)}</td>
-                <td style="text-align:center; font-weight: bold; color:#0284c7;">${r.status || 'غياب مبرر'}</td>
-                <td style="text-align:center; color:#059669; font-weight:bold;">معتمد رسمياً ✓</td>
+                <td style="text-align:center; font-weight: bold; color:#0284c7;">${r.status || 'استئذان رسمي'}</td>
+                <td style="text-align:center; font-family: monospace; font-weight: bold; color: ${r.tout?.text && r.tout.text !== '-' ? '#047857' : '#dc2626'};">${r.tout?.text && r.tout.text !== '-' ? r.tout.text : 'بدون بصمة'}</td>
+                <td style="text-align:center; color: ${r.tout?.text && r.tout.text !== '-' ? '#059669' : '#dc2626'}; font-weight:bold;">
+                  ${r.tout?.text && r.tout.text !== '-' ? 'موثق ببصمة ✓' : '⚠️ بدون بصمة خروج'}
+                </td>
               </tr>
             `).join('')}
           </tbody>
@@ -3864,7 +4369,7 @@ export default function App() {
 
   const handleExportExcusesListWord = () => {
     const list = filterDailyRecords(dailyRecords)
-      .filter(r => r.type === 'excuse')
+      .filter(r => isEmergencyLeave(r.status) || r.checkout === 'استئذان بدون بصمة انصراف' || r.checkout === 'استئذان طارئ موثق (بصمة)')
       .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
     const targetTeacher = selectedEmployee !== 'all' 
       ? selectedEmployee 
@@ -3874,7 +4379,7 @@ export default function App() {
     const wordHtml = `
       <html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'>
       <head>
-        <title>كشف الغياب بعذر والأعذار</title>
+        <title>كشف الاستئذانات الرسمية وتوثيق بصمة الخروج</title>
         <style>
           body { font-family: 'Arial', sans-serif; direction: rtl; text-align: right; }
           .header { border-bottom: 2px solid #0284c7; padding-bottom: 10px; margin-bottom: 20px; }
@@ -3886,10 +4391,13 @@ export default function App() {
       <body>
         <div class="header">
           <h2>مدرسة الجشة المتوسطة - إدارة التعليم بالأحساء</h2>
-          <h3>كشف الغياب بعذر والأعذار المعتمدة (إجمالي الأيام: ${list.length})</h3>
+          <h3>كشف الاستئذانات الرسمية وتوثيق بصمة الخروج (إجمالي الحالات: ${list.length})</h3>
           <p>
             ${selectedMonth === 'all' ? 'الفترة: كامل الفصل الدراسي' : `الشهر: ${selectedMonth}`}
             | تاريخ التصدير: ${new Date().toLocaleDateString('ar-SA')}م (${toHijri(new Date())})
+          </p>
+          <p style="font-size: 11px; color: #555;">
+            تنبيه: الاستئذان لا يعد غياباً لكون المعلم قد باشر الحضور الفعلي بالمدرسة.
           </p>
         </div>
 
@@ -3899,10 +4407,11 @@ export default function App() {
               <th>#</th>
               <th>اسم المعلم / الموظف</th>
               <th>المسمى الوظيفي</th>
-              <th style="text-align:center;">تاريخ العذر</th>
+              <th style="text-align:center;">تاريخ الاستئذان</th>
               <th style="text-align:center;">اليوم</th>
-              <th style="text-align:center;">نوع الإجازة / العذر</th>
-              <th style="text-align:center;">حالة الاعتماد</th>
+              <th style="text-align:center;">نوع الاستئذان</th>
+              <th style="text-align:center;">بصمة الانصراف</th>
+              <th style="text-align:center;">حالة التوثيق</th>
             </tr>
           </thead>
           <tbody>
@@ -3913,8 +4422,9 @@ export default function App() {
                 <td>${r.job || '-'}</td>
                 <td style="text-align:center;">${formatWordDate(r.date)}</td>
                 <td style="text-align:center;">${dayName(r.date)}</td>
-                <td style="text-align:center;">${r.status || 'غياب مبرر'}</td>
-                <td style="text-align:center;">معتمد رسمياً ✓</td>
+                <td style="text-align:center;">${r.status || 'استئذان رسمي'}</td>
+                <td style="text-align:center; font-family: monospace;">${r.tout?.text && r.tout.text !== '-' ? r.tout.text : 'بدون بصمة'}</td>
+                <td style="text-align:center;">${r.tout?.text && r.tout.text !== '-' ? 'موثق ببصمة ✓' : '⚠️ بدون بصمة خروج'}</td>
               </tr>
             `).join('')}
           </tbody>
@@ -3942,7 +4452,7 @@ export default function App() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `كشف_الأعذار_والإجازات_${(selectedMonth === 'all' ? 'كامل' : selectedMonth).replace(/\s+/g, '_')}.doc`;
+    a.download = `كشف_الاستئذانات_الرسمية_${(selectedMonth === 'all' ? 'كامل' : selectedMonth).replace(/\s+/g, '_')}.doc`;
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -4406,6 +4916,25 @@ export default function App() {
             </button>
 
             <button
+              onClick={() => { setCurrentTab('leaves'); setSelectedStatus('all'); }}
+              className={`w-full flex items-center justify-between p-3.5 rounded-xl text-right font-bold transition-all border border-white/5 ${
+                currentTab === 'leaves'
+                  ? 'bg-white text-teal-950 shadow-md'
+                  : 'bg-white/5 text-white hover:bg-white/10'
+              }`}
+            >
+              <span className="flex items-center gap-3">
+                <HeartPulse className="w-5 h-5 text-emerald-400" />
+                <span>الإجازات</span>
+              </span>
+              {dailyRecords.length > 0 && (dashboardSickCount + dashboardEmergencyCount) > 0 && (
+                <span className="bg-emerald-500/30 text-emerald-300 text-xs px-2 py-0.5 rounded-full font-bold">
+                  {dashboardSickCount + dashboardEmergencyCount}
+                </span>
+              )}
+            </button>
+
+            <button
               onClick={() => { setCurrentTab('excuses'); setSelectedStatus('all'); }}
               className={`w-full flex items-center justify-between p-3.5 rounded-xl text-right font-bold transition-all border border-white/5 ${
                 currentTab === 'excuses'
@@ -4415,7 +4944,7 @@ export default function App() {
             >
               <span className="flex items-center gap-3">
                 <FileText className="w-5 h-5 text-cyan-400" />
-                <span>الغياب بعذر والأعذار</span>
+                <span>الاستئذانات</span>
               </span>
             </button>
 
@@ -4482,7 +5011,8 @@ export default function App() {
                 {currentTab === 'late' && '🕒 رصد التأخر الصباحي'}
                 {currentTab === 'early' && '🚪 كشف رصد الخروج قبل نهاية الدوام (الخاضعين للمحاسبة)'}
                 {currentTab === 'absence' && '📅 رصد الغياب بدون عذر'}
-                {currentTab === 'excuses' && '📄 سجل الغياب بعذر والمسوغات'}
+                {currentTab === 'leaves' && '🏖️ سجل إدارة ومتابعة الإجازات'}
+                {currentTab === 'excuses' && '📋 سجل متابعة الاستئذانات الرسمية'}
                 {currentTab === 'monthly' && '📈 التقارير الدورية والملخصات'}
                 {currentTab === 'settings' && '⚙️ إعدادات الحضور والتقييم'}
               </h2>
@@ -4677,20 +5207,31 @@ export default function App() {
                     </div>
 
                     {/* LEAVES & EXCUSES CARD */}
-                    <div className="bg-white p-3.5 rounded-2xl border border-slate-200 shadow-sm flex flex-col justify-between">
+                    <div
+                      onClick={() => {
+                        setSelectedStatus('all');
+                        setCurrentTab('leaves');
+                      }}
+                      className="bg-white p-3.5 rounded-2xl border border-emerald-200 shadow-sm flex flex-col justify-between cursor-pointer hover:border-emerald-400 hover:shadow-md transition-all group"
+                      title="اضغط لفتح سجل إدارة الإجازات (المرضية والاضطرارية) ومطالبة المعلمين بالرفع في فارس"
+                    >
                       <div className="flex items-center justify-between">
-                        <span className="text-xs text-slate-400 font-bold">بطاقة الإجازات</span>
-                        <span className="text-[10px] bg-teal-50 text-teal-700 px-1.5 py-0.5 rounded-md font-bold">فارس</span>
+                        <span className="text-xs text-slate-500 font-bold">بطاقة الإجازات</span>
+                        <span className="text-[10px] bg-emerald-50 text-emerald-800 px-1.5 py-0.5 rounded-md font-bold">نظام فارس</span>
                       </div>
                       <div className="grid grid-cols-2 gap-2 mt-2 pt-1.5 border-t border-slate-50">
                         <div className="border-l border-slate-100 pl-1">
-                          <span className="block text-[9px] font-bold text-slate-400">سنوية</span>
-                          <span className="text-sm font-extrabold text-emerald-600 block mt-0.5">{dashboardAnnualCount} <span className="text-[9px] font-normal text-slate-400">يوم</span></span>
+                          <span className="block text-[9px] font-bold text-slate-400">مرضية</span>
+                          <span className="text-sm font-extrabold text-sky-600 block mt-0.5">{dashboardSickCount} <span className="text-[9px] font-normal text-slate-400">يوم</span></span>
                         </div>
                         <div className="pr-1">
-                          <span className="block text-[9px] font-bold text-slate-400">طارئة</span>
-                          <span className="text-sm font-extrabold text-blue-600 block mt-0.5">{dashboardEmergencyCount} <span className="text-[9px] font-normal text-slate-400">يوم</span></span>
+                          <span className="block text-[9px] font-bold text-slate-400">اضطرارية</span>
+                          <span className="text-sm font-extrabold text-amber-600 block mt-0.5">{dashboardEmergencyCount} <span className="text-[9px] font-normal text-slate-400">يوم</span></span>
                         </div>
+                      </div>
+                      <div className="mt-2 text-[10px] text-teal-700 border-t border-slate-50 pt-1 flex items-center justify-between font-bold group-hover:text-teal-900">
+                        <span>متابعة الإجازات</span>
+                        <span>←</span>
                       </div>
                     </div>
 
@@ -6267,12 +6808,713 @@ export default function App() {
                 </div>
               )}
 
-              {/* E. EXCUSES & LEAVES TAB */}
+              {/* E. LEAVES TAB (SICK & EMERGENCY) */}
+              {currentTab === 'leaves' && (
+                <div className="space-y-6">
+                  {/* POLICY & REGULATION BANNER */}
+                  <div className="bg-gradient-to-r from-teal-50 via-emerald-50 to-cyan-50 border-2 border-emerald-300 rounded-3xl p-5 text-sm leading-relaxed shadow-xs" dir="rtl">
+                    <div className="flex items-start gap-3.5">
+                      <div className="bg-emerald-600 text-white p-2.5 rounded-2xl mt-0.5 shrink-0 shadow-sm">
+                        <HeartPulse className="w-6 h-6" />
+                      </div>
+                      <div className="space-y-2">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <h4 className="font-black text-teal-950 text-base flex items-center gap-2">
+                            <span>📋 ضوابط متابعة الإجازات والمطالبة برفعها في نظام فارس</span>
+                          </h4>
+                          <span className="text-[11px] font-bold bg-white text-emerald-800 border border-emerald-200 px-2.5 py-1 rounded-full shadow-2xs">
+                            منصة الإدارة المدرسية المباشرة
+                          </span>
+                        </div>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs text-slate-700 font-medium pt-1">
+                          <div className="bg-white/80 p-3 rounded-2xl border border-emerald-100 flex items-start gap-2">
+                            <span className="text-base">🏥</span>
+                            <div>
+                              <strong className="text-teal-950 block mb-0.5">1- إجازة مرضية (وفق عذر طبي):</strong>
+                              <span>تمنح بناءً على تقرير طبي معتمد صادر من منصة (صحتي) أو جهة صحية معتمدة. يلزم المعلم برفعها في فارس لاعتمادها رسمياً من مدير المدرسة.</span>
+                            </div>
+                          </div>
+                          <div className="bg-white/80 p-3 rounded-2xl border border-emerald-100 flex items-start gap-2">
+                            <span className="text-base">⚡</span>
+                            <div>
+                              <strong className="text-amber-950 block mb-0.5">2- إجازة اضطرارية (5 أيام فقط):</strong>
+                              <span>حدها الأقصى <strong>5 أيام فقط</strong> نظاماً في العام الدراسي، ولا يقبل النظام أي يوم إضافي بعد استنفاد الرصيد المخصص لكل معلم.</span>
+                            </div>
+                          </div>
+                        </div>
+                        <p className="text-[11px] text-emerald-900 font-bold bg-emerald-100/70 p-2 rounded-xl mt-1">
+                          💡 <strong>إجراء مدير المدرسة:</strong> يمكنك تحديد نوع الإجازة لكل معلم ومطالبته فوراً عبر زر (📱 واتساب) برفع الإجازة في نظام فارس لضمان عدم الحسم أو المساءلة، وتوثيق اعتمادها بضغطة زر.
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* SUMMARY CARDS */}
+                  {(() => {
+                    const leavesList = getLeavesList();
+                    const sickCount = leavesList.filter(r => getRecordLeaveType(r) === 'sick').length;
+                    const emergencyCount = leavesList.filter(r => getRecordLeaveType(r) === 'emergency').length;
+                    const pendingCount = leavesList.filter(r => !faresSubmitted[`${r.name}|${r.dateKey}`]).length;
+                    const employeesList = getEmployeesNames();
+                    const warningCount = employeesList.filter(name => getTeacherEmergencyDays(name).length >= 4).length;
+
+                    return (
+                      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4" dir="rtl">
+                        <div
+                          onClick={() => setLeaveFilterType('sick')}
+                          className={`p-4 rounded-2xl border transition-all cursor-pointer ${
+                            leaveFilterType === 'sick'
+                              ? 'bg-sky-50 border-sky-400 shadow-sm ring-2 ring-sky-300'
+                              : 'bg-white border-slate-200 hover:border-sky-300'
+                          }`}
+                        >
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs font-bold text-slate-500">إجازات مرضية</span>
+                            <span className="text-[10px] bg-sky-100 text-sky-800 px-2 py-0.5 rounded-md font-black">عذر طبي ✓</span>
+                          </div>
+                          <div className="text-3xl font-black text-sky-600 mt-2">{sickCount} <span className="text-xs font-normal text-slate-400">يوم</span></div>
+                          <div className="text-[10px] text-slate-400 mt-1 font-semibold">بناءً على تقارير طبية معتمدة</div>
+                        </div>
+
+                        <div
+                          onClick={() => setLeaveFilterType('emergency')}
+                          className={`p-4 rounded-2xl border transition-all cursor-pointer ${
+                            leaveFilterType === 'emergency'
+                              ? 'bg-amber-50 border-amber-400 shadow-sm ring-2 ring-amber-300'
+                              : 'bg-white border-slate-200 hover:border-amber-300'
+                          }`}
+                        >
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs font-bold text-slate-500">إجازات اضطرارية</span>
+                            <span className="text-[10px] bg-amber-100 text-amber-800 px-2 py-0.5 rounded-md font-black">حد أقصى 5 أيام</span>
+                          </div>
+                          <div className="text-3xl font-black text-amber-600 mt-2">{emergencyCount} <span className="text-xs font-normal text-slate-400">يوم</span></div>
+                          <div className="text-[10px] text-slate-400 mt-1 font-semibold">تخصم من رصيد الـ 5 أيام</div>
+                        </div>
+
+                        <div
+                          onClick={() => setLeaveFilterType('pending')}
+                          className={`p-4 rounded-2xl border transition-all cursor-pointer ${
+                            leaveFilterType === 'pending'
+                              ? 'bg-rose-50 border-rose-400 shadow-sm ring-2 ring-rose-300'
+                              : 'bg-white border-slate-200 hover:border-rose-300'
+                          }`}
+                        >
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs font-bold text-slate-500">بانتظار الرفع في فارس</span>
+                            <span className="text-[10px] bg-rose-100 text-rose-800 px-2 py-0.5 rounded-md font-black">تتطلب مطالبة</span>
+                          </div>
+                          <div className="text-3xl font-black text-rose-600 mt-2">{pendingCount} <span className="text-xs font-normal text-slate-400">حالة</span></div>
+                          <div className="text-[10px] text-slate-400 mt-1 font-semibold">تحتاج مراسلة المعلم عبر واتساب</div>
+                        </div>
+
+                        <div
+                          onClick={() => setLeaveFilterType('warning_limit')}
+                          className={`p-4 rounded-2xl border transition-all cursor-pointer ${
+                            leaveFilterType === 'warning_limit'
+                              ? 'bg-purple-50 border-purple-400 shadow-sm ring-2 ring-purple-300'
+                              : 'bg-white border-slate-200 hover:border-purple-300'
+                          }`}
+                        >
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs font-bold text-slate-500">تنبيه رصيد الاضطرارية</span>
+                            <span className="text-[10px] bg-purple-100 text-purple-800 px-2 py-0.5 rounded-md font-black">4 أو 5 أيام</span>
+                          </div>
+                          <div className="text-3xl font-black text-purple-600 mt-2">{warningCount} <span className="text-xs font-normal text-slate-400">معلم</span></div>
+                          <div className="text-[10px] text-slate-400 mt-1 font-semibold">قاربوا أو استنفدوا الحد الأقصى</div>
+                        </div>
+                      </div>
+                    );
+                  })()}
+
+                  {/* CIRCULAR PIECHART: SICK VS EMERGENCY LEAVES RATIO ACROSS ALL TEACHERS */}
+                  {(() => {
+                    const schoolLeaves = getAllSchoolLeavesInPeriod();
+                    const schoolSickCount = schoolLeaves.filter(r => getRecordLeaveType(r) === 'sick').length;
+                    const schoolEmergencyCount = schoolLeaves.filter(r => getRecordLeaveType(r) === 'emergency').length;
+                    const schoolTotalCategorized = schoolSickCount + schoolEmergencyCount;
+                    const schoolSickPct = schoolTotalCategorized > 0 ? Math.round((schoolSickCount / schoolTotalCategorized) * 100) : 0;
+                    const schoolEmergencyPct = schoolTotalCategorized > 0 ? (100 - schoolSickPct) : 0;
+
+                    const pieChartData = [
+                      { name: 'مرضية', value: schoolSickCount, color: '#0284c7' },
+                      { name: 'اضطرارية', value: schoolEmergencyCount, color: '#f59e0b' },
+                    ].filter(d => d.value > 0);
+
+                    const activePeriodLabel = selectedPeriodType === 'range'
+                      ? `الفترة المحددة: من ${selectedStartDate || 'البداية'} إلى ${selectedEndDate || 'النهاية'}`
+                      : (selectedMonth === 'all' ? 'كامل الفصل الدراسي / جميع الأشهر' : `شهر: ${selectedMonth}`);
+
+                    return (
+                      <div className="bg-white border border-slate-200 rounded-3xl p-5 shadow-sm" dir="rtl">
+                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4 pb-3 border-b border-slate-100">
+                          <div>
+                            <h4 className="font-extrabold text-teal-950 text-base flex items-center gap-2">
+                              <span>🥧 الرسم البياني الدائري: نسبة الإجازات المرضية مقابل الاضطرارية لجميع المعلمين</span>
+                            </h4>
+                            <p className="text-xs text-slate-400 mt-0.5">
+                              تحليل إحصائي ونسب مقارنة لكافة معلمي المدرسة خلال {activePeriodLabel}
+                            </p>
+                          </div>
+
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="text-xs font-bold bg-sky-50 text-sky-800 border border-sky-200 px-3 py-1 rounded-xl">
+                              مرضية: {schoolSickCount} يوم ({schoolSickPct}%)
+                            </span>
+                            <span className="text-xs font-bold bg-amber-50 text-amber-800 border border-amber-200 px-3 py-1 rounded-xl">
+                              اضطرارية: {schoolEmergencyCount} يوم ({schoolEmergencyPct}%)
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => handleOpenAddLeaveModal()}
+                              className="bg-teal-700 hover:bg-teal-800 text-white font-extrabold px-3 py-1 rounded-xl text-xs transition-all shadow-xs flex items-center gap-1 cursor-pointer"
+                              title="تسجيل إجازة مريضة أو اضطرارية جديدة للمعلم"
+                            >
+                              <span>➕ تسجيل إجازة</span>
+                            </button>
+                          </div>
+                        </div>
+
+                        {schoolTotalCategorized > 0 ? (
+                          <div className="grid grid-cols-1 md:grid-cols-12 gap-6 items-center">
+                            {/* Circular Pie Chart Canvas */}
+                            <div className="md:col-span-5 h-64 flex flex-col items-center justify-center relative">
+                              <ResponsiveContainer width="100%" height="100%">
+                                <PieChart>
+                                  <Pie
+                                    data={pieChartData}
+                                    cx="50%"
+                                    cy="50%"
+                                    innerRadius={55}
+                                    outerRadius={85}
+                                    paddingAngle={5}
+                                    dataKey="value"
+                                    nameKey="name"
+                                  >
+                                    {pieChartData.map((entry, index) => (
+                                      <Cell key={`leave-cell-${index}`} fill={entry.color} />
+                                    ))}
+                                  </Pie>
+                                  <Tooltip
+                                    formatter={(value: any, name: any) => [
+                                      `${value} يوم (${schoolTotalCategorized > 0 ? Math.round(((value as number) / schoolTotalCategorized) * 100) : 0}%)`,
+                                      name
+                                    ]}
+                                    contentStyle={{
+                                      backgroundColor: '#0f172a',
+                                      color: '#ffffff',
+                                      borderRadius: '12px',
+                                      border: 'none',
+                                      direction: 'rtl',
+                                      textAlign: 'right',
+                                      fontWeight: 'bold',
+                                      fontSize: '12px',
+                                    }}
+                                  />
+                                  <Legend verticalAlign="bottom" height={36} />
+                                </PieChart>
+                              </ResponsiveContainer>
+                              <div className="absolute top-[40%] text-center pointer-events-none">
+                                <span className="text-2xl font-black text-slate-800 block">{schoolTotalCategorized}</span>
+                                <span className="text-[10px] font-bold text-slate-400">إجمالي الأيام</span>
+                              </div>
+                            </div>
+
+                            {/* Percentage Breakdown & Legal Regulations */}
+                            <div className="md:col-span-7 space-y-4">
+                              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                {/* Sick Leave Card */}
+                                <div className="bg-sky-50/70 border border-sky-200 rounded-2xl p-4">
+                                  <div className="flex items-center justify-between">
+                                    <span className="text-xs font-bold text-sky-800 flex items-center gap-1.5">
+                                      <span>إجازات مرضية</span>
+                                    </span>
+                                    <span className="text-xs font-black bg-sky-200 text-sky-900 px-2 py-0.5 rounded-lg">
+                                      {schoolSickPct}%
+                                    </span>
+                                  </div>
+                                  <div className="text-2xl font-black text-sky-700 mt-2">
+                                    {schoolSickCount} <span className="text-xs font-normal text-sky-600">يوم مسجل</span>
+                                  </div>
+                                  <div className="w-full bg-sky-200 h-2 rounded-full overflow-hidden mt-2">
+                                    <div className="bg-sky-600 h-full rounded-full transition-all" style={{ width: `${schoolSickPct}%` }} />
+                                  </div>
+                                  <p className="text-[10px] text-sky-700 mt-1.5 font-medium">
+                                    وفق تقارير طبية معتمدة من جهات صحية رسمية
+                                  </p>
+                                </div>
+
+                                {/* Emergency Leave Card */}
+                                <div className="bg-amber-50/70 border border-amber-200 rounded-2xl p-4">
+                                  <div className="flex items-center justify-between">
+                                    <span className="text-xs font-bold text-amber-800 flex items-center gap-1.5">
+                                      <span>إجازات اضطرارية</span>
+                                    </span>
+                                    <span className="text-xs font-black bg-amber-200 text-amber-900 px-2 py-0.5 rounded-lg">
+                                      {schoolEmergencyPct}%
+                                    </span>
+                                  </div>
+                                  <div className="text-2xl font-black text-amber-700 mt-2">
+                                    {schoolEmergencyCount} <span className="text-xs font-normal text-amber-600">يوم مسجل</span>
+                                  </div>
+                                  <div className="w-full bg-amber-200 h-2 rounded-full overflow-hidden mt-2">
+                                    <div className="bg-amber-500 h-full rounded-full transition-all" style={{ width: `${schoolEmergencyPct}%` }} />
+                                  </div>
+                                  <p className="text-[10px] text-amber-700 mt-1.5 font-medium">
+                                    تخصم من رصيد المعلم النظامي في العام الدراسي
+                                  </p>
+                                </div>
+                              </div>
+
+                              {/* Comparative analysis insight */}
+                              <div className="bg-slate-50 border border-slate-200 rounded-2xl p-3 text-xs text-slate-600 flex items-center justify-between gap-3">
+                                <div className="flex items-center gap-2">
+                                  <span className="text-base">💡</span>
+                                  <span>
+                                    <strong>المؤشر الإجمالي:</strong> تشكل الإجازات المرضية <strong>{schoolSickPct}%</strong> من إجمالي إجازات منسوبي المدرسة مقابل <strong>{schoolEmergencyPct}%</strong> للإجازات الاضطرارية خلال هذه الفترة.
+                                  </span>
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="p-8 text-center bg-slate-50 rounded-2xl border border-dashed border-slate-200">
+                            <div className="w-12 h-12 rounded-2xl bg-teal-100 text-teal-700 flex items-center justify-center mx-auto text-xl mb-2 font-bold">
+                              📊
+                            </div>
+                            <h5 className="font-extrabold text-slate-700 text-sm">
+                              لا توجد إجازات مرضية أو اضطرارية مسجلة خلال هذه الفترة حتى الآن
+                            </h5>
+                            <p className="text-xs text-slate-400 mt-1 max-w-md mx-auto">
+                              بمجرد قيامك بتسجيل إجازة مريضة أو اضطرارية لأي معلم، سيتم إنشاء الرسم البياني الدائري تلقائياً واحتساب نسب التوزيع بدقة.
+                            </p>
+                            <button
+                              type="button"
+                              onClick={() => handleOpenAddLeaveModal()}
+                              className="mt-3 bg-teal-700 hover:bg-teal-800 text-white font-extrabold px-4 py-2 rounded-xl text-xs transition-all shadow-xs inline-flex items-center gap-1.5 cursor-pointer"
+                            >
+                              <span>➕ تسجيل أول إجازة الآن</span>
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
+
+                  {/* TEACHER EMERGENCY BALANCE DRAWER / MONITOR */}
+                  <div className="bg-white border border-slate-200 rounded-3xl p-5 shadow-sm" dir="rtl">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4 pb-3 border-b border-slate-100">
+                      <div>
+                        <h4 className="font-extrabold text-teal-950 text-base flex items-center gap-2">
+                          <span>📊 بطاقة رصد واستهلاك الإجازة الاضطرارية لكافة المعلمين (5 أيام نظاماً)</span>
+                        </h4>
+                        <p className="text-xs text-slate-400 mt-0.5">
+                          تتبع رصيد كل معلم من الأيام الاضطرارية الخمسة والتأكد من عدم تجاوز الحد المسموح
+                        </p>
+                      </div>
+                      <span className="text-xs font-bold bg-amber-50 text-amber-800 border border-amber-200 px-3 py-1 rounded-xl self-start sm:self-auto">
+                        الحد النظامي: 5 أيام في العام
+                      </span>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3 max-h-64 overflow-y-auto p-1">
+                      {getEmployeesNames().map(empName => {
+                        const used = getTeacherEmergencyDays(empName).length;
+                        const remaining = Math.max(0, 5 - used);
+                        const isMaxed = used >= 5;
+                        const isWarning = used === 4;
+
+                        return (
+                          <div
+                            key={empName}
+                            onClick={() => {
+                              setSelectedEmployee(empName);
+                              setLeaveFilterType('all');
+                            }}
+                            className={`p-3 rounded-2xl border transition-all cursor-pointer ${
+                              isMaxed
+                                ? 'bg-rose-50/70 border-rose-300 hover:border-rose-400'
+                                : isWarning
+                                ? 'bg-amber-50/70 border-amber-300 hover:border-amber-400'
+                                : 'bg-slate-50 border-slate-200 hover:border-teal-300'
+                            }`}
+                          >
+                            <div className="flex items-center justify-between mb-1">
+                              <span className="font-bold text-xs text-slate-800 truncate" title={empName}>
+                                {empName}
+                              </span>
+                              <span className={`text-[10px] font-black px-1.5 py-0.5 rounded-md ${
+                                isMaxed
+                                  ? 'bg-rose-200 text-rose-900'
+                                  : isWarning
+                                  ? 'bg-amber-200 text-amber-900'
+                                  : 'bg-emerald-100 text-emerald-800'
+                              }`}>
+                                {used} / 5
+                              </span>
+                            </div>
+                            <div className="w-full bg-slate-200 h-2 rounded-full overflow-hidden my-1.5">
+                              <div
+                                className={`h-full transition-all ${
+                                  isMaxed ? 'bg-rose-600' : isWarning ? 'bg-amber-500' : 'bg-emerald-500'
+                                }`}
+                                style={{ width: `${Math.min(100, (used / 5) * 100)}%` }}
+                              />
+                            </div>
+                            <div className="flex items-center justify-between text-[10px] font-medium text-slate-500 mt-2">
+                              <span>{isMaxed ? 'استنفد الرصيد!' : `متبقي: ${remaining} يوم`}</span>
+                              <div className="flex items-center gap-1.5">
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleOpenAddLeaveModal(empName);
+                                  }}
+                                  className="text-[10px] bg-teal-100 hover:bg-teal-200 text-teal-800 font-extrabold px-2 py-0.5 rounded-md transition-all cursor-pointer"
+                                  title={`تسجيل إجازة جديدة للأستاذ ${empName}`}
+                                >
+                                  + إجازة
+                                </button>
+                                <span className="text-teal-700 font-bold hover:underline">عرض ←</span>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {/* FILTERS & SEARCH TOOLBAR */}
+                  <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-xs flex flex-wrap items-center justify-between gap-4">
+                    <div className="flex flex-wrap items-center gap-3">
+                      <div>
+                        <label className="block text-[10px] font-bold text-slate-400 mb-1">تصفية الفترة حسب</label>
+                        <select
+                          value={selectedPeriodType}
+                          onChange={(e) => setSelectedPeriodType(e.target.value as 'month' | 'range')}
+                          className="bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-sm font-bold text-slate-700 outline-none focus:border-teal-500 transition-all"
+                        >
+                          <option value="month">📅 الشهر</option>
+                          <option value="range">🗓️ نطاق تاريخ</option>
+                        </select>
+                      </div>
+
+                      {selectedPeriodType === 'month' ? (
+                        <div>
+                          <label className="block text-[10px] font-bold text-slate-400 mb-1">
+                            {selectedMonth === 'all' ? 'الفترة المستهدفة' : 'الشهر المستهدف'}
+                          </label>
+                          <select
+                            value={selectedMonth}
+                            onChange={(e) => setSelectedMonth(e.target.value)}
+                            className="bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-sm font-bold text-slate-700 outline-none focus:border-teal-500 transition-all"
+                          >
+                            <option value="all">كل الأشهر المسجلة</option>
+                            {getMonthsList().map(m => (
+                              <option key={m} value={m}>{m}</option>
+                            ))}
+                          </select>
+                        </div>
+                      ) : (
+                        <>
+                          <div>
+                            <label className="block text-[10px] font-bold text-slate-400 mb-1">من تاريخ</label>
+                            <input
+                              type="date"
+                              value={selectedStartDate}
+                              onChange={(e) => setSelectedStartDate(e.target.value)}
+                              className="bg-slate-50 border border-slate-200 rounded-xl px-3 py-1.5 text-sm font-bold text-slate-700 outline-none focus:border-teal-500 transition-all h-[38px]"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[10px] font-bold text-slate-400 mb-1">إلى تاريخ</label>
+                            <input
+                              type="date"
+                              value={selectedEndDate}
+                              onChange={(e) => setSelectedEndDate(e.target.value)}
+                              className="bg-slate-50 border border-slate-200 rounded-xl px-3 py-1.5 text-sm font-bold text-slate-700 outline-none focus:border-teal-500 transition-all h-[38px]"
+                            />
+                          </div>
+                        </>
+                      )}
+
+                      <div>
+                        <label className="block text-[10px] font-bold text-slate-400 mb-1">الموظف / المعلم</label>
+                        <select
+                          value={selectedEmployee}
+                          onChange={(e) => setSelectedEmployee(e.target.value)}
+                          className="bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-sm font-bold text-slate-700 outline-none focus:border-teal-500 transition-all max-w-[220px]"
+                        >
+                          <option value="all">جميع المعلمين والموظفين</option>
+                          {getEmployeesNames().map(name => (
+                            <option key={name} value={name}>{name}</option>
+                          ))}
+                        </select>
+                      </div>
+
+                      <div>
+                        <label className="block text-[10px] font-bold text-slate-400 mb-1">تصفية نوع الإجازة</label>
+                        <select
+                          value={leaveFilterType}
+                          onChange={(e) => setLeaveFilterType(e.target.value as any)}
+                          className="bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-sm font-bold text-slate-700 outline-none focus:border-teal-500 transition-all"
+                        >
+                          <option value="all">كل الإجازات</option>
+                          <option value="sick">إجازات مرضية</option>
+                          <option value="emergency">إجازات اضطرارية</option>
+                          <option value="pending">لم تُرفع في فارس (✗)</option>
+                          <option value="submitted">مرفوعة في فارس (✓)</option>
+                          <option value="warning_limit">تنبيه رصيد الاضطرارية (4 أو 5 أيام)</option>
+                        </select>
+                      </div>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-3">
+                      <div className="w-full sm:w-60">
+                        <label className="block text-[10px] font-bold text-slate-400 mb-1">البحث السريع بالاسم</label>
+                        <input
+                          type="text"
+                          placeholder="ابحث عن اسم موظف..."
+                          value={searchTerm}
+                          onChange={(e) => setSearchTerm(e.target.value)}
+                          className="bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-sm w-full outline-none focus:border-teal-500 transition-all font-medium"
+                        />
+                      </div>
+                      <div className="flex items-end gap-2">
+                        <button
+                          type="button"
+                          onClick={() => handleOpenAddLeaveModal(selectedEmployee !== 'all' ? selectedEmployee : undefined)}
+                          className="bg-teal-700 hover:bg-teal-800 text-white font-extrabold px-3.5 py-2 rounded-xl text-xs flex items-center gap-1.5 transition-all shadow-xs h-[38px] cursor-pointer"
+                          title="تسجيل إجازة مريضة أو اضطرارية جديدة للمعلم"
+                        >
+                          <span>➕ تسجيل إجازة جديدة</span>
+                        </button>
+                        <button
+                          onClick={handlePrintLeavesList}
+                          className="bg-teal-600 hover:bg-teal-700 text-white font-bold px-4 py-2 rounded-xl text-xs flex items-center gap-1.5 transition-all shadow-xs h-[38px]"
+                          title="طباعة كشف الإجازات المرضية والاضطرارية PDF"
+                        >
+                          <Printer className="w-4 h-4" />
+                          <span>طباعة PDF</span>
+                        </button>
+                        <button
+                          onClick={handleExportLeavesListWord}
+                          className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold px-3 py-2 rounded-xl text-xs flex items-center gap-1.5 transition-all shadow-xs h-[38px]"
+                          title="تصدير كشف الإجازات Word"
+                        >
+                          <FileDown className="w-4 h-4" />
+                          <span>Word</span>
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* COMPREHENSIVE LEAVES TABLE */}
+                  <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-sm">
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-right text-sm border-collapse">
+                        <thead>
+                          <tr className="bg-slate-50 text-slate-600 border-b border-slate-200">
+                            <th className="p-3 font-bold text-center">#</th>
+                            <th className="p-3 font-bold">اسم المعلم / الموظف</th>
+                            <th className="p-3 font-bold">المسمى الوظيفي</th>
+                            <th className="p-3 font-bold text-center">التاريخ</th>
+                            <th className="p-3 font-bold text-center">اليوم</th>
+                            <th className="p-3 font-bold text-center">نوع الإجازة</th>
+                            <th className="p-3 font-bold text-center">رصيد الاضطرارية</th>
+                            <th className="p-3 font-bold text-center">الرفع في فارس</th>
+                            <th className="p-3 font-bold text-center">الإجراءات</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {(() => {
+                            const filtered = getLeavesList().filter(r => {
+                              const lType = getRecordLeaveType(r);
+                              const isSubmitted = !!faresSubmitted[`${r.name}|${r.dateKey}`];
+                              const usedEm = getTeacherEmergencyDays(r.name).length;
+
+                              if (leaveFilterType === 'sick') return lType === 'sick';
+                              if (leaveFilterType === 'emergency') return lType === 'emergency';
+                              if (leaveFilterType === 'pending') return !isSubmitted;
+                              if (leaveFilterType === 'submitted') return isSubmitted;
+                              if (leaveFilterType === 'warning_limit') return usedEm >= 4;
+                              return true;
+                            }).sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+
+                            if (filtered.length === 0) {
+                              return (
+                                <tr>
+                                  <td colSpan={9} className="p-10 text-center text-slate-500">
+                                    <div className="max-w-md mx-auto space-y-3">
+                                      <div className="w-12 h-12 rounded-2xl bg-teal-50 text-teal-700 flex items-center justify-center mx-auto text-2xl font-bold">
+                                        {selectedEmployee !== 'all' ? '👤' : '🌴'}
+                                      </div>
+                                      <p className="text-base text-slate-800 font-extrabold">
+                                        {selectedEmployee !== 'all'
+                                          ? `لا توجد إجازات مسجلة حالياً للأستاذ / ${selectedEmployee}`
+                                          : 'لا توجد سجلات إجازات مطابقة لهذه التصفية'}
+                                      </p>
+                                      <p className="text-xs text-slate-500 leading-relaxed font-normal">
+                                        {selectedEmployee !== 'all'
+                                          ? `المعلم منضبط أو لم يتم تسجيل غياب أو إجازة له في هذه الفترة. يمكنك تسجيل إجازة مرضية أو اضطرارية له الآن بضغطة زر أدناه:`
+                                          : 'لا توجد إجازات مرضية أو اضطرارية مسجلة خلال الفترة المحددة. يمكنك الضغط على الزر أدناه لتسجيل إجازة جديدة لأي معلم بالمدرسة.'}
+                                      </p>
+                                      <div className="flex flex-wrap items-center justify-center gap-2 pt-2">
+                                        <button
+                                          type="button"
+                                          onClick={() => handleOpenAddLeaveModal(selectedEmployee !== 'all' ? selectedEmployee : undefined)}
+                                          className="bg-teal-700 hover:bg-teal-800 text-white font-extrabold px-4 py-2.5 rounded-xl text-xs transition-all shadow-sm flex items-center gap-1.5 cursor-pointer"
+                                        >
+                                          <span>➕ تسجيل إجازة {selectedEmployee !== 'all' ? `للأستاذ ${selectedEmployee}` : 'جديدة'} الآن</span>
+                                        </button>
+                                        {selectedEmployee !== 'all' && (
+                                          <button
+                                            type="button"
+                                            onClick={() => setSelectedEmployee('all')}
+                                            className="bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold px-3.5 py-2.5 rounded-xl text-xs transition-all border border-slate-200 cursor-pointer"
+                                          >
+                                            عرض جميع المعلمين
+                                          </button>
+                                        )}
+                                      </div>
+                                    </div>
+                                  </td>
+                                </tr>
+                              );
+                            }
+
+                            return filtered.map((r, i) => {
+                              const rKey = `${r.name}|${r.dateKey}`;
+                              const lType = getRecordLeaveType(r);
+                              const isSubmitted = !!faresSubmitted[rKey];
+                              const usedEmergency = getTeacherEmergencyDays(r.name).length;
+                              const isMaxEmergency = usedEmergency >= 5;
+                              const isWarningEmergency = usedEmergency === 4;
+
+                              return (
+                                <tr key={rKey + i} className="border-b border-slate-100 hover:bg-slate-50/50 transition-all">
+                                  <td className="p-3 text-center text-slate-400 font-mono text-xs">{i + 1}</td>
+                                  <td className="p-3 font-bold text-slate-800">{r.name}</td>
+                                  <td className="p-3 text-slate-400 text-xs">{r.job || '-'}</td>
+                                  <td className="p-3 text-center">{renderDateCell(r.date)}</td>
+                                  <td className="p-3 text-center text-slate-500 text-xs font-semibold">{dayName(r.date)}</td>
+                                  
+                                  {/* LEAVE TYPE SELECTOR BUTTONS: مرضية / اضطرارية */}
+                                  <td className="p-3 text-center">
+                                    <div className="inline-flex items-center gap-1 bg-slate-100 p-1 rounded-xl">
+                                      <button
+                                        type="button"
+                                        onClick={() => setRecordLeaveClassification(rKey, 'sick')}
+                                        className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                                          lType === 'sick'
+                                            ? 'bg-sky-600 text-white shadow-xs'
+                                            : 'text-slate-600 hover:bg-white hover:text-sky-700'
+                                        }`}
+                                        title="تحديد كإجازة مرضية"
+                                      >
+                                        مرضية
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => setRecordLeaveClassification(rKey, 'emergency')}
+                                        className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                                          lType === 'emergency'
+                                            ? 'bg-amber-600 text-white shadow-xs'
+                                            : 'text-slate-600 hover:bg-white hover:text-amber-700'
+                                        }`}
+                                        title="تحديد كإجازة اضطرارية"
+                                      >
+                                        اضطرارية
+                                      </button>
+                                    </div>
+                                  </td>
+
+                                  {/* EMERGENCY BALANCE FOR THIS TEACHER */}
+                                  <td className="p-3 text-center">
+                                    {lType === 'emergency' ? (
+                                      <div className="inline-flex flex-col items-center">
+                                        <span className={`font-bold text-xs px-2.5 py-0.5 rounded-full ${
+                                          isMaxEmergency
+                                            ? 'bg-rose-100 text-rose-800 border border-rose-300'
+                                            : isWarningEmergency
+                                            ? 'bg-amber-100 text-amber-800 border border-amber-300'
+                                            : 'bg-emerald-100 text-emerald-800'
+                                        }`}>
+                                          {usedEmergency} من 5 أيام
+                                        </span>
+                                      </div>
+                                    ) : (
+                                      <span className="text-slate-400 text-xs">-</span>
+                                    )}
+                                  </td>
+
+                                  {/* FARES SUBMISSION STATUS (مربع تفاعلي للرفع في فارس مع علامة صح أو خطأ) */}
+                                  <td className="p-3 text-center">
+                                    <button
+                                      type="button"
+                                      onClick={() => toggleFaresStatus(rKey)}
+                                      className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-xl border text-xs font-bold transition-all cursor-pointer shadow-2xs ${
+                                        isSubmitted
+                                          ? 'bg-emerald-50 text-emerald-800 border-emerald-300 hover:bg-emerald-100'
+                                          : 'bg-rose-50 text-rose-800 border-rose-200 hover:bg-rose-100'
+                                      }`}
+                                      title={isSubmitted ? 'تم الرفع في فارس (اضغط لتغييرها إلى لم يُرفع)' : 'لم يُرفع في فارس (اضغط لتأكيد الرفع والاعتماد)'}
+                                    >
+                                      <span className={`w-5 h-5 rounded-md flex items-center justify-center font-black text-xs ${
+                                        isSubmitted ? 'bg-emerald-600 text-white' : 'bg-rose-600 text-white'
+                                      }`}>
+                                        {isSubmitted ? '✓' : '✗'}
+                                      </span>
+                                      <span>{isSubmitted ? 'تم الرفع' : 'لم يُرفع'}</span>
+                                    </button>
+                                  </td>
+
+                                  {/* ACTIONS & WHATSAPP DEMAND BUTTON */}
+                                  <td className="p-3 text-center">
+                                    <div className="flex items-center justify-center gap-1.5">
+                                      <button
+                                        type="button"
+                                        onClick={() => handleDemandFaresWhatsApp(r, lType === 'unspecified' ? undefined : lType)}
+                                        className="bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold px-3 py-1.5 rounded-xl text-xs transition-all inline-flex items-center gap-1.5 shadow-xs cursor-pointer"
+                                        title="إرسال رسالة مطالبة رسمية للمعلم عبر واتساب لرفع الإجازة في نظام فارس"
+                                      >
+                                        <MessageSquare className="w-3.5 h-3.5" />
+                                        <span>مطالبة بالرفع (واتساب)</span>
+                                      </button>
+
+                                      <button
+                                        type="button"
+                                        onClick={() => setEditingRecord(r)}
+                                        className="text-amber-700 bg-amber-50 hover:bg-amber-100 font-bold px-2.5 py-1.5 rounded-lg text-xs transition-all inline-flex items-center gap-1 cursor-pointer"
+                                        title="تعديل السجل"
+                                      >
+                                        <Edit className="w-3.5 h-3.5" />
+                                        <span>تعديل</span>
+                                      </button>
+                                    </div>
+                                  </td>
+                                </tr>
+                              );
+                            });
+                          })()}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* F. PERMISSIONS MANAGEMENT TAB (الاستئذانات الرسمية) */}
               {currentTab === 'excuses' && (
                 <div className="space-y-6">
-                  {/* EXCUSES NOTE & COMPLIANCE WARNING */}
-                  <div className="bg-blue-50 border border-blue-200 text-blue-900 rounded-2xl p-4 text-xs leading-relaxed">
-                    يعرض هذا الجدول جميع حالات الغياب والإجازات التي تم إثباتها وتقديم مسوغاتها الرسمية أو الطبية بنجاح، بالإضافة إلى حالات الاستئذان الطارئ ومتابعة مدى التزام المعلمين بتسجيل بصمة الانصراف عند الخروج.
+                  {/* PERMISSIONS PRINCIPLE & COMPLIANCE NOTICE */}
+                  <div className="bg-sky-50 border border-sky-200 text-sky-950 rounded-2xl p-4 text-xs leading-relaxed" dir="rtl">
+                    <p className="font-bold flex items-center gap-1.5 text-sky-900 mb-1">
+                      <span>📌 تنبيه إداري ونظامي حول الاستئذان:</span>
+                    </p>
+                    <p>
+                      الاستئذان الرسمي لا يُعد غياباً عن المدرسة إطلاقاً لكون المعلم قد باشر الحضور والدوام الفعلي (سواء كان استئذاناً صباحياً أو انصرافاً مبكراً أو أثناء اليوم). يهدف هذا السجل إلى توثيق أوقات الاستئذان المعتمدة ومتابعة مدى التزام المعلمين بتسجيل بصمة الانصراف عند الخروج لحفظ حقوقهم وتفادي إدراجهم بالخطأ ضمن كشوف الغياب أو المساءلة.
+                    </p>
                   </div>
 
                   {/* EMERGENCY PERMISSION WITHOUT EXIT ALERT BANNER */}
@@ -6284,10 +7526,10 @@ export default function App() {
                         </div>
                         <div>
                           <h4 className="font-extrabold text-amber-950 text-sm">
-                            تنبيه انضباطي: تم رصد {stats.totalEmergencyNoExit} حالة استئذان طارئ بدون تسجيل بصمة انصراف عند المغادرة!
+                            تنبيه انضباطي: تم رصد {stats.totalEmergencyNoExit} حالة استئذان بدون تسجيل بصمة انصراف عند المغادرة!
                           </h4>
                           <p className="text-[11px] text-amber-800 mt-1 leading-relaxed">
-                            نظام العمل يلزم كل موظف أو معلم مستأذن طارئ بتسجيل بصمة الانصراف في جهاز البصمة لحظة الخروج الفعلي لتوثيق وقت المغادرة نظاماً. الخروج بدون بصمة انصراف يعد تصرفاً غير مكتمل ومخالفاً للتعليمات.
+                            نظام العمل يلزم كل موظف أو معلم مستأذن بتسجيل بصمة الانصراف في جهاز البصمة لحظة الخروج الفعلي لتوثيق وقت المغادرة نظاماً. الخروج بدون بصمة انصراف يعد تصرفاً غير مكتمل ومخالفاً للتعليمات.
                           </p>
                         </div>
                       </div>
@@ -6334,17 +7576,15 @@ export default function App() {
                       </div>
 
                       <div>
-                        <label className="block text-[10px] font-bold text-slate-400 mb-1">نوع المسوغ / الاستئذان</label>
+                        <label className="block text-[10px] font-bold text-slate-400 mb-1">حالة توثيق الاستئذان</label>
                         <select
                           value={excuseSubFilter}
                           onChange={(e) => setExcuseSubFilter(e.target.value as any)}
                           className="bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-sm font-bold text-slate-700 outline-none focus:border-teal-500 transition-all"
                         >
-                          <option value="all">كل الإجازات والاستئذانات</option>
-                          <option value="leaves">إجازات رسمية وأعذار غياب فقط</option>
-                          <option value="emergency_all">جميع الاستئذانات الطارئة</option>
-                          <option value="emergency_no_exit">⚠️ استئذان طارئ بدون بصمة انصراف (مخالف)</option>
-                          <option value="emergency_with_exit">✓ استئذان طارئ موثق ببصمة خروج</option>
+                          <option value="all">كل الاستئذانات المسجلة</option>
+                          <option value="emergency_with_exit">✓ استئذان موثق ببصمة انصراف</option>
+                          <option value="emergency_no_exit">⚠️ استئذان بدون بصمة انصراف (مخالف)</option>
                         </select>
                       </div>
                     </div>
@@ -6364,7 +7604,7 @@ export default function App() {
                         <button
                           onClick={handlePrintExcusesList}
                           className="bg-sky-600 hover:bg-sky-700 text-white font-bold px-4 py-2 rounded-xl text-xs flex items-center gap-1.5 transition-all shadow-xs h-[38px]"
-                          title="طباعة كشف الغياب بعذر والأعذار بصيغة PDF"
+                          title="طباعة كشف الاستئذانات الرسمية بصيغة PDF"
                         >
                           <Printer className="w-4 h-4" />
                           <span>طباعة PDF</span>
@@ -6372,7 +7612,7 @@ export default function App() {
                         <button
                           onClick={handleExportExcusesListWord}
                           className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold px-3 py-2 rounded-xl text-xs flex items-center gap-1.5 transition-all shadow-xs h-[38px]"
-                          title="تصدير كشف الغياب بعذر والأعذار Word"
+                          title="تصدير كشف الاستئذانات الرسمية Word"
                         >
                           <FileDown className="w-4 h-4" />
                           <span>Word</span>
@@ -6391,7 +7631,7 @@ export default function App() {
                             <th className="p-3 font-bold">المسمى الوظيفي</th>
                             <th className="p-3 font-bold text-center">التاريخ</th>
                             <th className="p-3 font-bold text-center">اليوم</th>
-                            <th className="p-3 font-bold text-center">نوع الإجازة / الاستئذان</th>
+                            <th className="p-3 font-bold text-center">نوع الاستئذان</th>
                             <th className="p-3 font-bold text-center">بصمة الانصراف والتوثيق</th>
                             <th className="p-3 font-bold text-center">المراسلة والتنبيه</th>
                             <th className="p-3 font-bold text-center">نظام فارس</th>
@@ -6402,12 +7642,9 @@ export default function App() {
                           {filterDailyRecords(dailyRecords)
                             .filter(r => {
                               const isEm = isEmergencyLeave(r.status) || r.checkout === 'استئذان بدون بصمة انصراف' || r.checkout === 'استئذان طارئ موثق (بصمة)';
-                              const isExc = r.type === 'excuse';
-                              if (!isEm && !isExc) return false;
-                              if (excuseSubFilter === 'leaves') return isExc && !isEm;
-                              if (excuseSubFilter === 'emergency_all') return isEm;
-                              if (excuseSubFilter === 'emergency_no_exit') return isEm && (!r.tout || r.tout.total == null || r.tout.text === '-');
-                              if (excuseSubFilter === 'emergency_with_exit') return isEm && !!(r.tout && r.tout.total != null && r.tout.text !== '-');
+                              if (!isEm) return false;
+                              if (excuseSubFilter === 'emergency_no_exit') return (!r.tout || r.tout.total == null || r.tout.text === '-');
+                              if (excuseSubFilter === 'emergency_with_exit') return !!(r.tout && r.tout.total != null && r.tout.text !== '-');
                               return true;
                             })
                             .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime())
@@ -8221,6 +9458,244 @@ export default function App() {
                   <button
                     onClick={() => setEditingRecord(null)}
                     className="bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold px-4 py-2.5 rounded-xl text-xs transition-all border border-slate-200 text-center"
+                  >
+                    إلغاء
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ADD LEAVE MODAL (مرضية / اضطرارية) */}
+        {isAddLeaveModalOpen && (
+          <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 z-50 animate-fade-in" dir="rtl">
+            <div className="bg-white rounded-3xl max-w-lg w-full overflow-hidden shadow-2xl border border-slate-200">
+              {/* Header */}
+              <div className="bg-gradient-to-r from-teal-800 to-teal-700 text-white p-5 flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className="bg-white/15 p-2 rounded-xl">
+                    <HeartPulse className="w-5 h-5 text-emerald-300" />
+                  </div>
+                  <div>
+                    <h3 className="font-extrabold text-base">تسجيل إجازة للمعلم (مرضية / اضطرارية)</h3>
+                    <p className="text-xs text-teal-100 font-normal">منصة مدير المدرسة المباشرة لتسجيل الإجازات ومطالبتها في نظام فارس</p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setIsAddLeaveModalOpen(false)}
+                  className="p-1.5 hover:bg-white/10 rounded-xl text-teal-100 hover:text-white transition-all cursor-pointer"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              {/* Form Content */}
+              <div className="p-5 space-y-4 max-h-[80vh] overflow-y-auto">
+                {/* 1. Teacher Selector */}
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1.5">
+                    اسم المعلم / الموظف <span className="text-rose-500">*</span>
+                  </label>
+                  <select
+                    value={leaveModalTeacher}
+                    onChange={(e) => setLeaveModalTeacher(e.target.value)}
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2.5 text-sm font-bold text-slate-800 outline-none focus:border-teal-600 transition-all"
+                  >
+                    <option value="">-- اختر اسم المعلم من القائمة --</option>
+                    {getEmployeesNames().map(name => (
+                      <option key={name} value={name}>{name}</option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* 2. Date Picker */}
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1.5">
+                    تاريخ يوم الإجازة <span className="text-rose-500">*</span>
+                  </label>
+                  <input
+                    type="date"
+                    value={leaveModalDate}
+                    onChange={(e) => setLeaveModalDate(e.target.value)}
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2.5 text-sm font-bold text-slate-800 outline-none focus:border-teal-600 transition-all"
+                  />
+                  {leaveModalDate && (
+                    <div className="text-[11px] text-teal-800 font-bold mt-1 bg-teal-50 px-2.5 py-1 rounded-lg">
+                      🗓️ {dayName(leaveModalDate)} الموافق {leaveModalDate}م ({toHijri(leaveModalDate)})
+                    </div>
+                  )}
+                </div>
+
+                {/* 3. Leave Type Choice: Sick vs Emergency */}
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-2">
+                    نوع الإجازة والمسوغ النظامي <span className="text-rose-500">*</span>
+                  </label>
+                  <div className="grid grid-cols-2 gap-3">
+                    <button
+                      type="button"
+                      onClick={() => setLeaveModalType('sick')}
+                      className={`p-3.5 rounded-2xl border text-right transition-all cursor-pointer ${
+                        leaveModalType === 'sick'
+                          ? 'bg-sky-50 border-sky-500 ring-2 ring-sky-300 shadow-xs'
+                          : 'bg-white border-slate-200 hover:border-sky-300'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="font-extrabold text-sm text-sky-900 flex items-center gap-1.5">
+                          <Stethoscope className="w-4 h-4 text-sky-600" />
+                          <span>إجازة مرضية</span>
+                        </span>
+                        {leaveModalType === 'sick' && <Check className="w-4 h-4 text-sky-600" />}
+                      </div>
+                      <p className="text-[10px] text-slate-500 leading-relaxed">
+                        وفق تقرير طبي معتمد
+                      </p>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setLeaveModalType('emergency')}
+                      className={`p-3.5 rounded-2xl border text-right transition-all cursor-pointer ${
+                        leaveModalType === 'emergency'
+                          ? 'bg-amber-50 border-amber-500 ring-2 ring-amber-300 shadow-xs'
+                          : 'bg-white border-slate-200 hover:border-amber-300'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="font-extrabold text-sm text-amber-900 flex items-center gap-1.5">
+                          <span>إجازة اضطرارية</span>
+                        </span>
+                        {leaveModalType === 'emergency' && <Check className="w-4 h-4 text-amber-600" />}
+                      </div>
+                      <p className="text-[10px] text-slate-500 leading-relaxed">
+                        تخصم من رصيد المعلم في العام الدراسي
+                      </p>
+                    </button>
+                  </div>
+                </div>
+
+                {/* Teacher Emergency Balance live indicator */}
+                {leaveModalTeacher && (
+                  <div className="bg-slate-50 border border-slate-200 rounded-2xl p-3.5 space-y-2">
+                    {(() => {
+                      const used = getTeacherEmergencyDays(leaveModalTeacher).length;
+                      const remaining = Math.max(0, 5 - used);
+                      const isMaxed = used >= 5;
+                      const isWarning = used === 4;
+
+                      return (
+                        <div>
+                          <div className="flex items-center justify-between text-xs font-bold">
+                            <span className="text-slate-700">
+                              رصيد الإجازة الاضطرارية للمعلم ({leaveModalTeacher}):
+                            </span>
+                            <span className={`px-2 py-0.5 rounded-lg text-xs font-black ${
+                              isMaxed
+                                ? 'bg-rose-100 text-rose-800'
+                                : isWarning
+                                ? 'bg-amber-100 text-amber-800'
+                                : 'bg-emerald-100 text-emerald-800'
+                            }`}>
+                              {used} من 5 أيام مستهلكة
+                            </span>
+                          </div>
+
+                          <div className="w-full bg-slate-200 h-2.5 rounded-full overflow-hidden my-2">
+                            <div
+                              className={`h-full transition-all ${
+                                isMaxed ? 'bg-rose-600' : isWarning ? 'bg-amber-500' : 'bg-emerald-500'
+                              }`}
+                              style={{ width: `${Math.min(100, (used / 5) * 100)}%` }}
+                            />
+                          </div>
+
+                          <div className="flex items-center justify-between text-[11px]">
+                            <span className="text-slate-500">
+                              المتبقي من الرصيد النظامي: <strong className="font-extrabold text-slate-700">{remaining} أيام</strong>
+                            </span>
+                            {leaveModalType === 'emergency' && (
+                              <span className="text-amber-700 font-bold">
+                                {isMaxed ? '⚠️ استنفد الرصيد بالكامل' : '✓ سيتم خصم هذا اليوم من الرصيد'}
+                              </span>
+                            )}
+                          </div>
+
+                          {isMaxed && leaveModalType === 'emergency' && (
+                            <div className="mt-2 bg-rose-50 border border-rose-200 text-rose-800 p-2.5 rounded-xl text-xs font-bold flex items-start gap-1.5">
+                              <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                              <span>
+                                تنبيه نظامي: هذا المعلم استنفد بالفعل كامل رصيده النظامي (5 أيام اضطرارية). يرجى تسجيلها كإجازة مرضية إذا توفر عذر طبي معتمد، أو توجيهه بمراجعة الإدارة.
+                              </span>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
+                  </div>
+                )}
+
+                {/* 4. Fares Approval Checkbox */}
+                <div className="bg-teal-50/50 border border-teal-100 rounded-2xl p-3.5">
+                  <label className="flex items-start gap-2.5 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={leaveModalFaresSubmitted}
+                      onChange={(e) => setLeaveModalFaresSubmitted(e.target.checked)}
+                      className="mt-1 w-4 h-4 text-teal-600 rounded border-slate-300 focus:ring-teal-500 cursor-pointer"
+                    />
+                    <div>
+                      <span className="text-xs font-extrabold text-teal-950 block">
+                        تم رفع الإجازة بنجاح واعتمادها في نظام فارس
+                      </span>
+                      <span className="text-[10px] text-slate-500 leading-relaxed block mt-0.5">
+                        عند التأشير، يُعتبر الغياب بعذر رسمي معتمد ولا يتم حسم أي درجات انضباط من تقييم المعلم. إذا لم تُرفع بعد، اتركها غير محددة لمطالبة المعلم برفعها عبر واتساب.
+                      </span>
+                    </div>
+                  </label>
+                </div>
+
+                {/* 5. Custom Notes */}
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                    ملاحظات أو مسوغات الإجازة (اختياري)
+                  </label>
+                  <input
+                    type="text"
+                    value={leaveModalNotes}
+                    onChange={(e) => setLeaveModalNotes(e.target.value)}
+                    placeholder="مثال: تقرير طبي من مستشفى الملك فهد / مراجعة عيادة..."
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs font-medium text-slate-800 outline-none focus:border-teal-600 transition-all"
+                  />
+                </div>
+
+                {/* Actions */}
+                <div className="flex flex-col sm:flex-row gap-2 pt-3 border-t border-slate-100">
+                  <button
+                    type="button"
+                    onClick={() => handleSaveNewLeave(false)}
+                    className="flex-1 bg-teal-700 hover:bg-teal-800 text-white font-extrabold py-2.5 px-4 rounded-xl text-xs shadow-sm transition-all flex items-center justify-center gap-1.5 cursor-pointer"
+                  >
+                    <Check className="w-4 h-4" />
+                    <span>حفظ الإجازة في السجل</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => handleSaveNewLeave(true)}
+                    className="bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold py-2.5 px-4 rounded-xl text-xs shadow-sm transition-all flex items-center justify-center gap-1.5 cursor-pointer"
+                    title="حفظ الإجازة وفتح واتساب فوراً لمطالبة المعلم برفعها في فارس"
+                  >
+                    <MessageSquare className="w-4 h-4" />
+                    <span>حفظ + إرسال مطالبة واتساب</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setIsAddLeaveModalOpen(false)}
+                    className="bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold py-2.5 px-4 rounded-xl text-xs transition-all border border-slate-200 cursor-pointer"
                   >
                     إلغاء
                   </button>
