@@ -40,6 +40,9 @@ export interface ParsedRow {
   earlyMins: number;
   type: 'present' | 'absence' | 'excuse' | 'other' | 'missing';
   late: number;
+  isLateExcused?: boolean;
+  lateExcusedReason?: string;
+  isMorningPermission?: boolean;
 }
 
 export interface EmployeeSummary {
@@ -53,6 +56,10 @@ export interface EmployeeSummary {
   excuse: number;
   lateCount: number;
   lateMins: number;
+  excusedLateCount?: number;
+  excusedLateMins?: number;
+  accountableLateCount?: number;
+  accountableLateMins?: number;
   completeCount: number;
   earlyCount: number;
   earlyMins: number;

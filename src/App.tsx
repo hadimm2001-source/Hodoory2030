@@ -9,6 +9,7 @@ import {
   Calendar,
   Settings as SettingsIcon,
   Upload,
+  CheckCircle,
   CheckCircle2,
   AlertCircle,
   Share2,
@@ -83,6 +84,7 @@ import {
   dayName,
   calculatePermissionDuration,
   formatMinutesToHours,
+  formatDurationToHoursArabic,
 } from './utils/time';
 
 import {
@@ -111,6 +113,7 @@ const LOCAL_STORAGE_KEYS = {
   IMPORT_STATS: 'jashah_import_stats_v1',
   LEAVE_CLASSIFICATIONS: 'jashah_leave_classifications_v1',
   PERMISSION_TIMES: 'jashah_permission_times_v1',
+  LATE_PERMISSIONS_APPROVED: 'jashah_late_permissions_approved_v1',
 };
 
 interface CustomTooltipProps {
@@ -266,6 +269,33 @@ export default function App() {
     setEditingPermissionRecord(null);
   };
 
+  // Track approved morning permissions (excused morning tardiness)
+  const [latePermissionsApproved, setLatePermissionsApproved] = useState<Record<string, boolean>>(() => {
+    const saved = localStorage.getItem(LOCAL_STORAGE_KEYS.LATE_PERMISSIONS_APPROVED);
+    return saved ? JSON.parse(saved) : {};
+  });
+
+  useEffect(() => {
+    localStorage.setItem(LOCAL_STORAGE_KEYS.LATE_PERMISSIONS_APPROVED, JSON.stringify(latePermissionsApproved));
+  }, [latePermissionsApproved]);
+
+  const toggleLatePermission = (rKey: string) => {
+    setLatePermissionsApproved(prev => ({
+      ...prev,
+      [rKey]: !prev[rKey],
+    }));
+  };
+
+  const isLateExcusedRecord = (r: { name?: string; dateKey?: string; status?: string; late?: number }) => {
+    if (!r || !r.name || !r.dateKey) return false;
+    const key = `${r.name}|${r.dateKey}`;
+    return !!(
+      latePermissionsApproved[key] ||
+      isEmergencyLeave(r.status) ||
+      faresSubmitted[key]
+    );
+  };
+
   // UI Navigation / Filter state
   const [currentTab, setCurrentTab] = useState<string>('dashboard');
   const [selectedMonth, setSelectedMonth] = useState<string>('all');
@@ -275,7 +305,8 @@ export default function App() {
   const [selectedEmployee, setSelectedEmployee] = useState<string>('all');
   const [selectedStatus, setSelectedStatus] = useState<string>('all');
   const [searchTerm, setSearchTerm] = useState<string>('');
-  const [excuseSubFilter, setExcuseSubFilter] = useState<'all' | 'leaves' | 'emergency_all' | 'emergency_no_exit' | 'emergency_with_exit'>('all');
+  const [lateFilterType, setLateFilterType] = useState<'all' | 'accountable' | 'excused'>('all');
+  const [excuseSubFilter, setExcuseSubFilter] = useState<'all' | 'leaves' | 'morning' | 'emergency_all' | 'emergency_no_exit' | 'emergency_with_exit'>('all');
   const [earlyFilterType, setEarlyFilterType] = useState<'accountable' | 'early_only' | 'wrong_time' | 'exempt' | 'all'>('accountable');
   const [leaveFilterType, setLeaveFilterType] = useState<'all' | 'sick' | 'emergency' | 'pending' | 'submitted' | 'warning_limit'>('all');
 
@@ -671,6 +702,8 @@ export default function App() {
               }
             }
 
+            const isLateExc = !!(latePermissionsApproved[key] || isEmergencyLeave(status) || isFaresExcuse);
+
             baseRecord = {
               ...imported,
               status,
@@ -678,6 +711,8 @@ export default function App() {
               tin: hasIn ? imported.tin : null,
               tout: hasOut ? imported.tout : null,
               late: lateMins,
+              isLateExcused: isLateExc,
+              isMorningPermission: isLateExc && lateMins > 0,
               expected: expCheck,
               checkout: checkState,
               earlyMins,
@@ -700,6 +735,8 @@ export default function App() {
               earlyMins: 0,
               type: isFaresExcuse ? 'excuse' : 'absence',
               late: 0,
+              isLateExcused: false,
+              isMorningPermission: false,
             };
           }
 
@@ -719,7 +756,13 @@ export default function App() {
         if (isWeekendDay || isHolidayDay || isExplicitSuspended || isAutoSuspended) {
           return; // Skip weekend/holiday/suspended completely
         }
-        dailyList.push(imported);
+        const k = `${imported.name}|${imported.dateKey}`;
+        const isLateExc = !!(latePermissionsApproved[k] || isEmergencyLeave(imported.status) || faresSubmitted[k]);
+        dailyList.push({
+          ...imported,
+          isLateExcused: isLateExc,
+          isMorningPermission: isLateExc && (imported.late || 0) > 0,
+        });
       });
     }
 
@@ -753,6 +796,10 @@ export default function App() {
           wrongTimeExitsCount: 0,
           emergencyNoExitCount: 0,
           emergencyWithExitCount: 0,
+          excusedLateCount: 0,
+          excusedLateMins: 0,
+          accountableLateCount: 0,
+          accountableLateMins: 0,
         });
       }
 
@@ -763,8 +810,16 @@ export default function App() {
         summary.present++;
         if (!isOff) {
           if (r.late > 0) {
-            summary.lateCount++;
-            summary.lateMins += r.late;
+            const isExcused = r.isLateExcused ?? isLateExcusedRecord(r);
+            if (isExcused) {
+              summary.excusedLateCount = (summary.excusedLateCount || 0) + 1;
+              summary.excusedLateMins = (summary.excusedLateMins || 0) + r.late;
+            } else {
+              summary.lateCount++;
+              summary.lateMins += r.late;
+              summary.accountableLateCount = (summary.accountableLateCount || 0) + 1;
+              summary.accountableLateMins = (summary.accountableLateMins || 0) + r.late;
+            }
           }
           if (r.checkout === 'مكتمل') {
             summary.completeCount++;
@@ -819,7 +874,7 @@ export default function App() {
       };
     });
     setMonthlySummaries(summaries);
-  }, [rawRows, faresSubmitted, config]);
+  }, [rawRows, faresSubmitted, config, latePermissionsApproved]);
 
   // 4. File Reading / Excel Import Handler
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -1397,6 +1452,10 @@ export default function App() {
             wrongTimeExitsCount: 0,
             emergencyNoExitCount: 0,
             emergencyWithExitCount: 0,
+            excusedLateCount: 0,
+            excusedLateMins: 0,
+            accountableLateCount: 0,
+            accountableLateMins: 0,
           });
         }
         const s = empMap.get(r.name)!;
@@ -1405,8 +1464,16 @@ export default function App() {
           s.present++;
           if (!isOff) {
             if (r.late > 0) {
-              s.lateCount++;
-              s.lateMins += r.late;
+              const isExcused = r.isLateExcused ?? isLateExcusedRecord(r);
+              if (isExcused) {
+                s.excusedLateCount = (s.excusedLateCount || 0) + 1;
+                s.excusedLateMins = (s.excusedLateMins || 0) + r.late;
+              } else {
+                s.lateCount++;
+                s.lateMins += r.late;
+                s.accountableLateCount = (s.accountableLateCount || 0) + 1;
+                s.accountableLateMins = (s.accountableLateMins || 0) + r.late;
+              }
             }
             if (r.checkout === 'مكتمل') {
               s.completeCount++;
@@ -1557,6 +1624,10 @@ export default function App() {
     }
 
     if (r.late > 0) {
+      const isLateExcused = r.isLateExcused ?? isLateExcusedRecord(r);
+      if (isLateExcused) {
+        return `السلام عليكم ورحمة الله وبركاته\n\nالأستاذ الموقر: ${r.name}\n\nنحيطكم علماً بأنه تم قبول واعتماد استئذانكم الصباحي ليوم ${dName} الموافق ${dStr} لمدة (${r.late} دقيقة) من بداية الدوام (${config.start}) وحتى وقت حضوركم (${r.tin?.text || '-'}).\n\nتعد فترة التأخر معفاة رسمياً بالاستئذان ولا يترتب عليها أي حسم أو أثر على تقييم الانضباط.\n\nشاكرين لكم حسن تعاونكم والتزامكم.`;
+      }
       return `السلام عليكم ورحمة الله وبركاته\n\nالأستاذ الموقر: ${r.name}\n\nنود إحاطتكم بأنه تم رصد تأخر في الحضور ليوم ${dName} الموافق ${dStr} بمقدار ${r.late} دقيقة عن الموعد المعتمد (${config.start}).\n\nنأمل منكم الالتزام بمواعيد الحضور لتعزيز انتظام العمل المدرسي.`;
     }
 
@@ -1648,6 +1719,10 @@ export default function App() {
           wrongTimeExitsCount: 0,
           emergencyNoExitCount: 0,
           emergencyWithExitCount: 0,
+          excusedLateCount: 0,
+          excusedLateMins: 0,
+          accountableLateCount: 0,
+          accountableLateMins: 0,
           attendanceRate: 0,
           rate: 100,
           rating: '',
@@ -1662,6 +1737,10 @@ export default function App() {
       agg.excuse += s.excuse || 0;
       agg.lateCount += s.lateCount || 0;
       agg.lateMins += s.lateMins || 0;
+      agg.excusedLateCount = (agg.excusedLateCount || 0) + (s.excusedLateCount || 0);
+      agg.excusedLateMins = (agg.excusedLateMins || 0) + (s.excusedLateMins || 0);
+      agg.accountableLateCount = (agg.accountableLateCount || 0) + (s.accountableLateCount || 0);
+      agg.accountableLateMins = (agg.accountableLateMins || 0) + (s.accountableLateMins || 0);
       agg.completeCount += s.completeCount || 0;
       agg.earlyCount += s.earlyCount || 0;
       agg.earlyMins += s.earlyMins || 0;
@@ -1716,6 +1795,8 @@ export default function App() {
     const totalAbsence = aggregatedSummaries.reduce((sum, m) => sum + (m.absence || 0), 0);
     const totalLateMins = aggregatedSummaries.reduce((sum, m) => sum + (m.lateMins || 0), 0);
     const totalLateCount = aggregatedSummaries.reduce((sum, m) => sum + (m.lateCount || 0), 0);
+    const totalExcusedLateCount = aggregatedSummaries.reduce((sum, m) => sum + (m.excusedLateCount || 0), 0);
+    const totalExcusedLateMins = aggregatedSummaries.reduce((sum, m) => sum + (m.excusedLateMins || 0), 0);
     const totalEarlyCount = aggregatedSummaries.reduce((sum, m) => sum + (m.earlyCount || 0), 0);
     const totalEarlyMins = aggregatedSummaries.reduce((sum, m) => sum + (m.earlyMins || 0), 0);
     const totalAutoCount = aggregatedSummaries.reduce((sum, m) => sum + (m.autoCount || 0), 0);
@@ -1736,6 +1817,8 @@ export default function App() {
       totalAbsence,
       totalLateMins,
       totalLateCount,
+      totalExcusedLateCount,
+      totalExcusedLateMins,
       totalEarlyCount,
       totalEarlyMins,
       totalAutoCount,
@@ -3142,8 +3225,21 @@ export default function App() {
   const handlePrintLateList = () => {
     const list = filterDailyRecords(dailyRecords)
       .filter(r => r.late > 0)
+      .filter(r => {
+        const isExcused = r.isLateExcused ?? isLateExcusedRecord(r);
+        if (lateFilterType === 'accountable') return !isExcused;
+        if (lateFilterType === 'excused') return isExcused;
+        return true;
+      })
       .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
     const totalLateMins = list.reduce((acc, r) => acc + r.late, 0);
+    const excusedList = list.filter(r => r.isLateExcused ?? isLateExcusedRecord(r));
+    const excusedCount = excusedList.length;
+    const excusedMinutes = excusedList.reduce((acc, r) => acc + r.late, 0);
+    const accountableList = list.filter(r => !(r.isLateExcused ?? isLateExcusedRecord(r)));
+    const accountableCount = accountableList.length;
+    const accountableMinutes = accountableList.reduce((acc, r) => acc + r.late, 0);
+
     const printWindow = window.open('', '_blank', 'width=1000,height=800');
     if (!printWindow) {
       alert('الرجاء السماح بالنوافذ المنبثقة للطباعة.');
@@ -3155,7 +3251,7 @@ export default function App() {
       <html lang="ar" dir="rtl">
       <head>
         <meta charset="utf-8">
-        <title>كشف التأخر الصباحي - مدرسة الجشة المتوسطة</title>
+        <title>كشف التأخر الصباحي والاستئذان - مدرسة الجشة المتوسطة</title>
         <style>
           @import url('https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800&display=swap');
           body {
@@ -3186,7 +3282,7 @@ export default function App() {
           }
           .summary-cards {
             display: grid;
-            grid-template-columns: 1fr 1fr;
+            grid-template-columns: 1fr 1fr 1fr;
             gap: 15px;
             margin-bottom: 25px;
           }
@@ -3198,14 +3294,20 @@ export default function App() {
             text-align: center;
           }
           .card-num {
-            font-size: 22px;
+            font-size: 24px;
             font-weight: 800;
             color: #b45309;
+            margin-bottom: 2px;
           }
           .card-lbl {
-            font-size: 12px;
+            font-size: 13px;
             color: #78350f;
             font-weight: bold;
+          }
+          .card-sub {
+            font-size: 11px;
+            font-weight: bold;
+            margin-top: 4px;
           }
           table {
             width: 100%;
@@ -3223,6 +3325,10 @@ export default function App() {
             color: #92400e;
             font-weight: bold;
           }
+          tfoot td {
+            border-top: 2px solid #b45309;
+            background-color: #fffbeb;
+          }
         </style>
       </head>
       <body>
@@ -3232,7 +3338,7 @@ export default function App() {
             إدارة التعليم بالأحساء<br>
             مدرسة الجشة المتوسطة
           </div>
-          <div class="report-title">كشف رصد التأخر الصباحي</div>
+          <div class="report-title">كشف رصد التأخر الصباحي والاستئذان</div>
           <div class="school-info" style="text-align: left;">
             التاريخ: ${new Date().toLocaleDateString('ar-SA')}م (${toHijri(new Date())})<br>
             بداية الدوام: ${config.start}
@@ -3242,16 +3348,30 @@ export default function App() {
         <div style="background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 12px; margin-bottom: 20px; font-size:13px; font-weight: bold; color: #b45309;">
           ${selectedMonth === 'all' ? 'الفترة المستهدفة: كامل الفصل الدراسي / كل الأشهر' : `الشهر المستهدف: ${selectedMonth}`}
           ${selectedEmployee !== 'all' ? ` | الموظف: ${selectedEmployee}` : ''}
+          ${lateFilterType === 'accountable' ? ' | التصفية: التأخر الخاضع للمساءلة فقط' : lateFilterType === 'excused' ? ' | التصفية: المستأذنون المعفيون فقط' : ''}
         </div>
 
         <div class="summary-cards">
           <div class="card">
-            <div class="card-num">${list.length}</div>
-            <div class="card-lbl">إجمالي حالات التأخر المسجلة</div>
+            <div class="card-num">${totalLateMins} <span style="font-size: 14px; font-weight: bold; color: #78350f;">دقيقة</span></div>
+            <div class="card-lbl">إجمالي مدة التأخر في الكشف</div>
+            <div class="card-sub" style="color: #92400e;">
+              ⏱️ تعادل: <b>${formatDurationToHoursArabic(totalLateMins)}</b> | ${list.length} حالة
+            </div>
           </div>
-          <div class="card">
-            <div class="card-num">${totalLateMins} دقيقة</div>
-            <div class="card-lbl">مجموع دقائق التأخر</div>
+          <div class="card" style="background-color: #fef2f2; border-color: #fca5a5;">
+            <div class="card-num" style="color: #dc2626;">${accountableMinutes} <span style="font-size: 14px; font-weight: bold; color: #dc2626;">دقيقة</span></div>
+            <div class="card-lbl" style="color: #991b1b;">تأخر خاضع للمساءلة (غير مبرر)</div>
+            <div class="card-sub" style="color: #b91c1c;">
+              ⚠️ تعادل: <b>${formatDurationToHoursArabic(accountableMinutes)}</b> | ${accountableCount} حالة خاضعة للخصم
+            </div>
+          </div>
+          <div class="card" style="background-color: #f0fdf4; border-color: #86efac;">
+            <div class="card-num" style="color: #16a34a;">${excusedMinutes} <span style="font-size: 14px; font-weight: bold; color: #16a34a;">دقيقة</span></div>
+            <div class="card-lbl" style="color: #166534;">مستأذنون معفيون (شفع لهم الاستئذان)</div>
+            <div class="card-sub" style="color: #15803d;">
+              ✓ تعادل: <b>${formatDurationToHoursArabic(excusedMinutes)}</b> | ${excusedCount} حالة معفية
+            </div>
           </div>
         </div>
 
@@ -3265,27 +3385,53 @@ export default function App() {
               <th style="text-align:center;">اليوم</th>
               <th style="text-align:center;">وقت الحضور الفعلي</th>
               <th style="text-align:center;">مدة التأخر</th>
+              <th style="text-align:center;">حالة الاستئذان والاعتماد</th>
             </tr>
           </thead>
           <tbody>
             ${list.length === 0 ? `
               <tr>
-                <td colspan="7" style="text-align:center; padding: 20px; color: #047857; font-weight:bold;">
-                  لا توجد أي حالات تأخر مسجلة خلال الفترة المحددة ✨
+                <td colspan="8" style="text-align:center; padding: 20px; color: #047857; font-weight:bold;">
+                  لا توجد أي حالات تطابق شروط العرض ✨
                 </td>
               </tr>
-            ` : list.map((r, idx) => `
+            ` : list.map((r, idx) => {
+              const isExc = r.isLateExcused ?? isLateExcusedRecord(r);
+              return `
               <tr>
                 <td style="text-align:center;">${idx + 1}</td>
                 <td><b>${r.name}</b></td>
                 <td>${r.job || '-'}</td>
                 <td style="text-align:center;">${formatPrintDate(r.date)}</td>
                 <td style="text-align:center;">${dayName(r.date)}</td>
-                <td style="text-align:center; color:#b91c1c; font-weight: bold;">${r.tin?.text || '-'}</td>
+                <td style="text-align:center; font-weight: bold;">${r.tin?.text || '-'}</td>
                 <td style="text-align:center; font-weight: bold; color:#b45309;">${r.late} دقيقة</td>
+                <td style="text-align:center; font-weight: bold;">
+                  ${isExc
+                    ? '<span style="color:#15803d;">✓ مستأذن (معفى نظاماً)</span>'
+                    : '<span style="color:#b91c1c;">⚠️ خاضع للمساءلة</span>'}
+                </td>
               </tr>
-            `).join('')}
+            `;
+            }).join('')}
           </tbody>
+          ${list.length > 0 ? `
+          <tfoot>
+            <tr style="background-color: #fffbeb; font-weight: bold;">
+              <td colspan="6" style="text-align: right; padding: 12px; font-size: 13px; color: #78350f;">
+                📌 <b>المجموع الإجمالي لجميع حالات التأخر في هذا الكشف:</b>
+              </td>
+              <td style="text-align: center; padding: 12px; font-size: 13px; color: #b45309; font-weight: 800; white-space: nowrap;">
+                ${totalLateMins} دقيقة<br>
+                <span style="font-size: 11px; color: #92400e; font-weight: bold;">(تعادل: ${formatDurationToHoursArabic(totalLateMins)})</span>
+              </td>
+              <td style="text-align: center; padding: 10px; font-size: 11px; line-height: 1.6;">
+                <div style="color: #b91c1c; font-weight: bold;">خاضع للخصم: ${accountableMinutes} دقيقة (${formatDurationToHoursArabic(accountableMinutes)})</div>
+                ${excusedMinutes > 0 ? `<div style="color: #15803d; font-weight: bold; margin-top: 2px;">معفى بالاستئذان: ${excusedMinutes} دقيقة (${formatDurationToHoursArabic(excusedMinutes)})</div>` : ''}
+              </td>
+            </tr>
+          </tfoot>
+          ` : ''}
         </table>
 
         <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-top: 45px; font-weight:bold; font-size:13px;">
@@ -3317,8 +3463,21 @@ export default function App() {
   const handleExportLateListWord = () => {
     const list = filterDailyRecords(dailyRecords)
       .filter(r => r.late > 0)
+      .filter(r => {
+        const isExcused = r.isLateExcused ?? isLateExcusedRecord(r);
+        if (lateFilterType === 'accountable') return !isExcused;
+        if (lateFilterType === 'excused') return isExcused;
+        return true;
+      })
       .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
     const totalLateMins = list.reduce((acc, r) => acc + r.late, 0);
+    const excusedList = list.filter(r => r.isLateExcused ?? isLateExcusedRecord(r));
+    const excusedCount = excusedList.length;
+    const excusedMinutes = excusedList.reduce((acc, r) => acc + r.late, 0);
+    const accountableList = list.filter(r => !(r.isLateExcused ?? isLateExcusedRecord(r)));
+    const accountableCount = accountableList.length;
+    const accountableMinutes = accountableList.reduce((acc, r) => acc + r.late, 0);
+
     const targetTeacher = selectedEmployee !== 'all' 
       ? selectedEmployee 
       : (Array.from(new Set(list.map(r => r.name))).length === 1 
@@ -3339,7 +3498,7 @@ export default function App() {
       <body>
         <div class="header">
           <h2>مدرسة الجشة المتوسطة - إدارة التعليم بالأحساء</h2>
-          <h3>كشف التأخر الصباحي (إجمالي الحالات: ${list.length} | مجموع الدقائق: ${totalLateMins} دقيقة)</h3>
+          <h3>كشف التأخر الصباحي (إجمالي مدة التأخر: ${totalLateMins} دقيقة - تعادل: ${formatDurationToHoursArabic(totalLateMins)} [${list.length} حالة] | خاضع للمساءلة: ${accountableMinutes} دقيقة [${accountableCount} حالة] | مستأذنون معفيون: ${excusedMinutes} دقيقة [${excusedCount} حالة])</h3>
           <p>
             ${selectedMonth === 'all' ? 'الفترة: كامل الفصل الدراسي' : `الشهر: ${selectedMonth}`}
             | تاريخ التصدير: ${new Date().toLocaleDateString('ar-SA')}م (${toHijri(new Date())})
@@ -3356,10 +3515,13 @@ export default function App() {
               <th style="text-align:center;">اليوم</th>
               <th style="text-align:center;">وقت الحضور</th>
               <th style="text-align:center;">مدة التأخر</th>
+              <th style="text-align:center;">الحالة والاعتماد</th>
             </tr>
           </thead>
           <tbody>
-            ${list.map((r, idx) => `
+            ${list.map((r, idx) => {
+              const isExc = r.isLateExcused ?? isLateExcusedRecord(r);
+              return `
               <tr>
                 <td>${idx + 1}</td>
                 <td><b>${r.name}</b></td>
@@ -3368,9 +3530,20 @@ export default function App() {
                 <td style="text-align:center;">${dayName(r.date)}</td>
                 <td style="text-align:center;">${r.tin?.text || '-'}</td>
                 <td style="text-align:center;">${r.late} دقيقة</td>
+                <td style="text-align:center; font-weight:bold;">${isExc ? 'مستأذن (معفى نظاماً)' : 'خاضع للمساءلة'}</td>
               </tr>
-            `).join('')}
+            `;
+            }).join('')}
           </tbody>
+          ${list.length > 0 ? `
+          <tfoot>
+            <tr style="background-color: #fef3c7; font-weight: bold;">
+              <td colspan="6" style="text-align: right; padding: 10px;">المجموع الإجمالي للتأخر في الكشف:</td>
+              <td style="text-align: center; padding: 10px; color: #b45309;">${totalLateMins} دقيقة (${formatDurationToHoursArabic(totalLateMins)})</td>
+              <td style="text-align: center; padding: 10px;">خاضع: ${accountableMinutes} د | معفى: ${excusedMinutes} د</td>
+            </tr>
+          </tfoot>
+          ` : ''}
         </table>
 
         <div style="margin-top: 40px; font-size: 13px; font-weight: bold;">
@@ -6106,147 +6279,357 @@ export default function App() {
               )}
 
               {/* C. LATE TAB */}
-              {currentTab === 'late' && (
-                <div className="space-y-6">
-                  {/* METRIC CHIPS FOR LATE TAB */}
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                    <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-xs">
-                      <span className="text-xs text-slate-400 font-bold">إجمالي مرات التأخر</span>
-                      <p className="text-2xl font-black text-amber-600 mt-1">{stats.totalLateCount} مرة</p>
-                    </div>
-                    <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-xs">
-                      <span className="text-xs text-slate-400 font-bold">إجمالي دقائق التأخر</span>
-                      <p className="text-2xl font-black text-slate-800 mt-1">{stats.totalLateMins} دقيقة</p>
-                    </div>
-                    <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-xs text-slate-600 font-medium text-xs leading-normal flex items-center">
-                      تعتمد عمليات حساب التأخر على وقت بداية الدوام المعتمد في الإعدادات ({config.start}). أي دقيقة بعد هذا الوقت تخصم 0.25 درجة من التقييم الشهري للموظف.
-                    </div>
-                  </div>
+              {currentTab === 'late' && (() => {
+                const baseLateList = filterDailyRecords(dailyRecords).filter(r => r.late > 0);
+                const allLateCount = baseLateList.length;
+                const excusedLateList = baseLateList.filter(r => r.isLateExcused ?? isLateExcusedRecord(r));
+                const excusedLateCount = excusedLateList.length;
+                const excusedLateMinutes = excusedLateList.reduce((sum, r) => sum + r.late, 0);
+                const accountableLateList = baseLateList.filter(r => !(r.isLateExcused ?? isLateExcusedRecord(r)));
+                const accountableLateCount = accountableLateList.length;
+                const accountableLateMinutes = accountableLateList.reduce((sum, r) => sum + r.late, 0);
+                const totalAllLateMinutes = accountableLateMinutes + excusedLateMinutes;
 
-                  {/* FILTERS PANEL */}
-                  <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-xs flex flex-wrap items-center justify-between gap-4">
-                    <div className="flex flex-wrap items-center gap-3">
-                      <div>
-                        <label className="block text-[10px] font-bold text-slate-400 mb-1">
-                          {selectedMonth === 'all' ? 'الفترة المستهدفة' : 'الشهر المستهدف'}
-                        </label>
-                        <select
-                          value={selectedMonth}
-                          onChange={(e) => setSelectedMonth(e.target.value)}
-                          className="bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-sm font-bold text-slate-700 outline-none focus:border-teal-500 transition-all"
-                        >
-                          <option value="all">كل الأشهر المسجلة</option>
-                          {getMonthsList().map(m => (
-                            <option key={m} value={m}>{m}</option>
-                          ))}
-                        </select>
+                const formatDurationToHoursArabic = (mins: number) => {
+                  if (mins <= 0) return '0 دقيقة';
+                  const h = Math.floor(mins / 60);
+                  const m = mins % 60;
+                  if (h === 0) return `${m} دقيقة`;
+                  if (m === 0) {
+                    if (h === 1) return 'ساعة واحدة';
+                    if (h === 2) return 'ساعتان';
+                    if (h >= 3 && h <= 10) return `${h} ساعات`;
+                    return `${h} ساعة`;
+                  }
+                  let hStr = `${h} ساعة`;
+                  if (h === 1) hStr = 'ساعة واحدة';
+                  if (h === 2) hStr = 'ساعتان';
+                  if (h >= 3 && h <= 10) hStr = `${h} ساعات`;
+                  return `${hStr} و ${m} دقيقة`;
+                };
+
+                const displayedLateList = baseLateList
+                  .filter(r => {
+                    const isExcused = r.isLateExcused ?? isLateExcusedRecord(r);
+                    if (lateFilterType === 'accountable') return !isExcused;
+                    if (lateFilterType === 'excused') return isExcused;
+                    return true;
+                  })
+                  .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+
+                return (
+                  <div className="space-y-6">
+                    {/* METRIC CHIPS FOR LATE TAB */}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                      {/* CARD 1: TOTAL LATE DURATION IN MINUTES WITH HOURS UNDERNEATH */}
+                      <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-xs flex items-center justify-between">
+                        <div>
+                          <span className="text-xs text-slate-500 font-bold">إجمالي مدة التأخر الصباحي</span>
+                          <p className="text-2xl font-black text-slate-800 mt-1">
+                            {totalAllLateMinutes} <span className="text-sm font-bold text-slate-500">دقيقة</span>
+                          </p>
+                          <div className="text-[11px] text-slate-500 font-semibold mt-1 flex flex-wrap items-center gap-1.5">
+                            <span className="text-amber-800 font-bold">⏱️ تعادل: {formatDurationToHoursArabic(totalAllLateMinutes)}</span>
+                            <span className="text-slate-300">|</span>
+                            <span>{allLateCount} حالة تأخر</span>
+                          </div>
+                        </div>
+                        <div className="w-10 h-10 rounded-xl bg-slate-100 text-slate-700 flex items-center justify-center font-black text-sm shrink-0">
+                          ⏰
+                        </div>
                       </div>
 
-                      <div>
-                        <label className="block text-[10px] font-bold text-slate-400 mb-1">الموظف / المعلم</label>
-                        <select
-                          value={selectedEmployee}
-                          onChange={(e) => setSelectedEmployee(e.target.value)}
-                          className="bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-sm font-bold text-slate-700 outline-none focus:border-teal-500 transition-all max-w-[240px]"
-                        >
-                          <option value="all">جميع المعلمين والموظفين</option>
-                          {getEmployeesNames().map(name => (
-                            <option key={name} value={name}>{name}</option>
-                          ))}
-                        </select>
+                      {/* CARD 2: ACCOUNTABLE LATE MINUTES WITH HOURS UNDERNEATH */}
+                      <div className="bg-white p-4 rounded-xl border border-rose-200 shadow-xs flex items-center justify-between">
+                        <div>
+                          <span className="text-xs text-rose-800 font-bold">تأخر خاضع للمساءلة (غير مبرر)</span>
+                          <p className="text-2xl font-black text-rose-600 mt-1">
+                            {accountableLateMinutes} <span className="text-sm font-bold text-rose-400">دقيقة</span>
+                          </p>
+                          <div className="text-[11px] text-rose-700 font-semibold mt-1 flex flex-wrap items-center gap-1.5">
+                            <span className="font-bold">⚠️ تعادل: {formatDurationToHoursArabic(accountableLateMinutes)}</span>
+                            <span className="text-rose-300">|</span>
+                            <span>{accountableLateCount} حالة للخصم</span>
+                          </div>
+                        </div>
+                        <div className="w-10 h-10 rounded-xl bg-rose-50 text-rose-700 flex items-center justify-center font-bold text-sm shrink-0">
+                          ⚠️
+                        </div>
+                      </div>
+
+                      {/* CARD 3: EXCUSED LATE MINUTES WITH HOURS UNDERNEATH */}
+                      <div className="bg-white p-4 rounded-xl border border-emerald-200 shadow-xs flex items-center justify-between">
+                        <div>
+                          <span className="text-xs text-emerald-800 font-bold">مستأذنون معفيون</span>
+                          <p className="text-2xl font-black text-emerald-600 mt-1">
+                            {excusedLateMinutes} <span className="text-sm font-bold text-emerald-500">دقيقة</span>
+                          </p>
+                          <div className="text-[11px] text-emerald-700 font-semibold mt-1 flex flex-wrap items-center gap-1.5">
+                            <span className="font-bold">✓ تعادل: {formatDurationToHoursArabic(excusedLateMinutes)}</span>
+                            <span className="text-emerald-300">|</span>
+                            <span>شفع لهم الاستئذان ({excusedLateCount} حالة)</span>
+                          </div>
+                        </div>
+                        <div className="w-10 h-10 rounded-xl bg-emerald-50 text-emerald-700 flex items-center justify-center font-bold text-sm shrink-0">
+                          ✓
+                        </div>
+                      </div>
+
+                      {/* CARD 4: REGULATORY EXPLANATION */}
+                      <div className="bg-sky-50 border border-sky-200 rounded-xl p-3 text-sky-950 font-medium text-xs leading-relaxed flex flex-col justify-center">
+                        <span className="font-extrabold text-sky-900 mb-0.5 flex items-center gap-1">
+                          <span>📌 الشفاعة النظامية للاستئذان:</span>
+                        </span>
+                        <span>إذا تأخر المعلم عن بداية الدوام ({config.start}) وقدم استئذاناً واعتمدته الإدارة، يوضع له خانة "مستأذن" ويعفى تماماً دون أي حسم أو إضرار بتقييمه.</span>
                       </div>
                     </div>
 
-                    <div className="flex flex-wrap items-center gap-3">
-                      <div className="w-full sm:w-64">
-                        <label className="block text-[10px] font-bold text-slate-400 mb-1">البحث السريع بالاسم</label>
-                        <input
-                          type="text"
-                          placeholder="ابحث عن اسم موظف..."
-                          value={searchTerm}
-                          onChange={(e) => setSearchTerm(e.target.value)}
-                          className="bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-sm w-full outline-none focus:border-amber-500 transition-all font-medium"
-                        />
+                    {/* FILTERS PANEL */}
+                    <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-xs flex flex-wrap items-center justify-between gap-4">
+                      <div className="flex flex-wrap items-center gap-3">
+                        <div>
+                          <label className="block text-[10px] font-bold text-slate-400 mb-1">
+                            {selectedMonth === 'all' ? 'الفترة المستهدفة' : 'الشهر المستهدف'}
+                          </label>
+                          <select
+                            value={selectedMonth}
+                            onChange={(e) => setSelectedMonth(e.target.value)}
+                            className="bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-sm font-bold text-slate-700 outline-none focus:border-teal-500 transition-all"
+                          >
+                            <option value="all">كل الأشهر المسجلة</option>
+                            {getMonthsList().map(m => (
+                              <option key={m} value={m}>{m}</option>
+                            ))}
+                          </select>
+                        </div>
+
+                        <div>
+                          <label className="block text-[10px] font-bold text-slate-400 mb-1">الموظف / المعلم</label>
+                          <select
+                            value={selectedEmployee}
+                            onChange={(e) => setSelectedEmployee(e.target.value)}
+                            className="bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-sm font-bold text-slate-700 outline-none focus:border-teal-500 transition-all max-w-[240px]"
+                          >
+                            <option value="all">جميع المعلمين والموظفين</option>
+                            {getEmployeesNames().map(name => (
+                              <option key={name} value={name}>{name}</option>
+                            ))}
+                          </select>
+                        </div>
+
+                        <div>
+                          <label className="block text-[10px] font-bold text-slate-400 mb-1">تصفية حالة الاستئذان والتأخر</label>
+                          <div className="flex items-center gap-1 p-1 bg-slate-100 rounded-xl">
+                            <button
+                              type="button"
+                              onClick={() => setLateFilterType('all')}
+                              className={`px-2.5 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                                lateFilterType === 'all' ? 'bg-white text-slate-800 shadow-2xs' : 'text-slate-600 hover:text-slate-900'
+                              }`}
+                            >
+                              الكل ({allLateCount})
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setLateFilterType('accountable')}
+                              className={`px-2.5 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1 ${
+                                lateFilterType === 'accountable' ? 'bg-rose-600 text-white shadow-2xs' : 'text-rose-700 hover:bg-rose-50'
+                              }`}
+                            >
+                              <span>خاضع للمساءلة</span>
+                              <span className="text-[10px] opacity-90">({accountableLateCount})</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setLateFilterType('excused')}
+                              className={`px-2.5 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1 ${
+                                lateFilterType === 'excused' ? 'bg-emerald-600 text-white shadow-2xs' : 'text-emerald-700 hover:bg-emerald-50'
+                              }`}
+                            >
+                              <span>مستأذنون</span>
+                              <span className="text-[10px] opacity-90">({excusedLateCount})</span>
+                            </button>
+                          </div>
+                        </div>
                       </div>
-                      <div className="flex items-end gap-2">
-                        <button
-                          onClick={handlePrintLateList}
-                          className="bg-amber-600 hover:bg-amber-700 text-white font-bold px-4 py-2 rounded-xl text-xs flex items-center gap-1.5 transition-all shadow-xs h-[38px]"
-                          title="طباعة كشف التأخر الصباحي بصيغة PDF"
-                        >
-                          <Printer className="w-4 h-4" />
-                          <span>طباعة PDF</span>
-                        </button>
-                        <button
-                          onClick={handleExportLateListWord}
-                          className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold px-3 py-2 rounded-xl text-xs flex items-center gap-1.5 transition-all shadow-xs h-[38px]"
-                          title="تصدير كشف التأخر الصباحي Word"
-                        >
-                          <FileDown className="w-4 h-4" />
-                          <span>Word</span>
-                        </button>
+
+                      <div className="flex flex-wrap items-center gap-3">
+                        <div className="w-full sm:w-64">
+                          <label className="block text-[10px] font-bold text-slate-400 mb-1">البحث السريع بالاسم</label>
+                          <input
+                            type="text"
+                            placeholder="ابحث عن اسم موظف..."
+                            value={searchTerm}
+                            onChange={(e) => setSearchTerm(e.target.value)}
+                            className="bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-sm w-full outline-none focus:border-amber-500 transition-all font-medium"
+                          />
+                        </div>
+                        <div className="flex items-end gap-2">
+                          <button
+                            onClick={handlePrintLateList}
+                            className="bg-amber-600 hover:bg-amber-700 text-white font-bold px-4 py-2 rounded-xl text-xs flex items-center gap-1.5 transition-all shadow-xs h-[38px] cursor-pointer"
+                            title="طباعة كشف التأخر الصباحي بصيغة PDF"
+                          >
+                            <Printer className="w-4 h-4" />
+                            <span>طباعة PDF</span>
+                          </button>
+                          <button
+                            onClick={handleExportLateListWord}
+                            className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold px-3 py-2 rounded-xl text-xs flex items-center gap-1.5 transition-all shadow-xs h-[38px] cursor-pointer"
+                            title="تصدير كشف التأخر الصباحي Word"
+                          >
+                            <FileDown className="w-4 h-4" />
+                            <span>Word</span>
+                          </button>
+                        </div>
                       </div>
                     </div>
-                  </div>
 
-                  {/* LATE TABLE */}
-                  <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-sm">
-                    <div className="overflow-x-auto">
-                      <table className="w-full text-right text-sm border-collapse">
-                        <thead>
-                          <tr className="bg-slate-50 text-slate-600 border-b border-slate-200">
-                            <th className="p-3 font-bold">اسم المعلم / الموظف</th>
-                            <th className="p-3 font-bold">المسمى الوظيفي</th>
-                            <th className="p-3 font-bold text-center">التاريخ</th>
-                            <th className="p-3 font-bold text-center">اليوم</th>
-                            <th className="p-3 font-bold text-center">وقت الحضور</th>
-                            <th className="p-3 font-bold text-center">مدة التأخر</th>
-                            <th className="p-3 font-bold text-center">الإجراء المتاح</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {filterDailyRecords(dailyRecords)
-                            .filter(r => r.late > 0)
-                            .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime())
-                            .map((r, i) => (
-                              <tr key={i} className="border-b border-slate-100 hover:bg-slate-50/50 transition-all">
-                                <td className="p-3 font-bold text-slate-800">{r.name}</td>
-                                <td className="p-3 text-slate-400 text-xs">{r.job || '-'}</td>
-                                <td className="p-3 text-center">{renderDateCell(r.date)}</td>
-                                <td className="p-3 text-center text-slate-500 text-xs font-semibold">{dayName(r.date)}</td>
-                                <td className="p-3 text-center font-mono font-bold text-rose-600">{r.tin?.text || '-'}</td>
-                                <td className="p-3 text-center">
-                                  <span className="bg-amber-100 text-amber-800 font-bold text-xs px-2 py-1 rounded-full">
-                                    {r.late} دقيقة
-                                  </span>
-                                </td>
-                                <td className="p-3 text-center">
-                                  <div className="flex items-center justify-center gap-1.5">
-                                    <button
-                                      onClick={() => handleOpenMessageModal(`${r.name}|${r.dateKey}`)}
-                                      className="text-teal-700 bg-teal-50 hover:bg-teal-100 font-bold px-2.5 py-1.5 rounded-lg text-xs transition-all inline-flex items-center gap-1"
-                                    >
-                                      <MessageSquare className="w-3.5 h-3.5" />
-                                      <span>تنبيه تأخير</span>
-                                    </button>
-                                    <button
-                                      onClick={() => setEditingRecord(r)}
-                                      className="text-amber-700 bg-amber-50 hover:bg-amber-100 font-bold px-2.5 py-1.5 rounded-lg text-xs transition-all inline-flex items-center gap-1"
-                                      title="تعديل وقت البصمة وحالة الحضور"
-                                    >
-                                      <Edit className="w-3.5 h-3.5" />
-                                      <span>تعديل</span>
-                                    </button>
-                                  </div>
+                    {/* LATE TABLE */}
+                    <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-sm">
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-right text-sm border-collapse">
+                          <thead>
+                            <tr className="bg-slate-50 text-slate-600 border-b border-slate-200">
+                              <th className="p-3 font-bold">اسم المعلم / الموظف</th>
+                              <th className="p-3 font-bold">المسمى الوظيفي</th>
+                              <th className="p-3 font-bold text-center">التاريخ</th>
+                              <th className="p-3 font-bold text-center">اليوم</th>
+                              <th className="p-3 font-bold text-center">وقت الحضور</th>
+                              <th className="p-3 font-bold text-center">حالة التأخر والاستئذان</th>
+                              <th className="p-3 font-bold text-center">الإجراء المتاح والاعتماد</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {displayedLateList.length === 0 ? (
+                              <tr>
+                                <td colSpan={7} className="p-8 text-center text-slate-400 font-medium">
+                                  لا توجد أي سجلات تطابق شروط التصفية الحالية ✨
                                 </td>
                               </tr>
-                            ))}
-                        </tbody>
-                      </table>
+                            ) : displayedLateList.map((r, i) => {
+                              const rKey = `${r.name}|${r.dateKey}`;
+                              const isExcused = r.isLateExcused ?? isLateExcusedRecord(r);
+
+                              return (
+                                <tr key={i} className={`border-b border-slate-100 transition-all ${
+                                  isExcused ? 'bg-emerald-50/20 hover:bg-emerald-50/40' : 'hover:bg-slate-50/50'
+                                }`}>
+                                  <td className="p-3 font-bold text-slate-800">{r.name}</td>
+                                  <td className="p-3 text-slate-400 text-xs">{r.job || '-'}</td>
+                                  <td className="p-3 text-center">{renderDateCell(r.date)}</td>
+                                  <td className="p-3 text-center text-slate-500 text-xs font-semibold">{dayName(r.date)}</td>
+                                  <td className="p-3 text-center font-mono font-bold text-slate-800">{r.tin?.text || '-'}</td>
+                                  <td className="p-3 text-center">
+                                    {isExcused ? (
+                                      <div className="inline-flex flex-col items-center justify-center gap-0.5">
+                                        <span className="bg-emerald-100 text-emerald-950 border border-emerald-300 font-black text-xs px-2.5 py-1 rounded-full inline-flex items-center gap-1 shadow-2xs">
+                                          <CheckCircle className="w-3.5 h-3.5 text-emerald-700 shrink-0" />
+                                          <span>مستأذن ({r.late} دقيقة)</span>
+                                        </span>
+                                        <span className="text-[10px] text-emerald-700 font-bold">
+                                          معفى بالاستئذان (شفع له) • من {config.start} إلى {r.tin?.text}
+                                        </span>
+                                      </div>
+                                    ) : (
+                                      <div className="inline-flex flex-col items-center justify-center gap-0.5">
+                                        <span className="bg-rose-100 text-rose-950 border border-rose-300 font-black text-xs px-2.5 py-1 rounded-full inline-flex items-center gap-1 shadow-2xs">
+                                          <AlertCircle className="w-3.5 h-3.5 text-rose-700 shrink-0" />
+                                          <span>تأخر {r.late} دقيقة</span>
+                                        </span>
+                                        <span className="text-[10px] text-rose-700 font-bold">
+                                          تأخر غير مبرر (خاضع للمساءلة)
+                                        </span>
+                                      </div>
+                                    )}
+                                  </td>
+                                  <td className="p-3 text-center">
+                                    <div className="flex items-center justify-center gap-1.5">
+                                      {isExcused ? (
+                                        <button
+                                          type="button"
+                                          onClick={() => toggleLatePermission(rKey)}
+                                          className="bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold px-2.5 py-1.5 rounded-xl text-xs transition-all border border-slate-300 inline-flex items-center gap-1 cursor-pointer"
+                                          title="إلغاء الاعتماد وإعادته لتأخر غير مبرر خاضع للمساءلة"
+                                        >
+                                          <Undo2 className="w-3.5 h-3.5 text-slate-500" />
+                                          <span>إلغاء الاستئذان</span>
+                                        </button>
+                                      ) : (
+                                        <button
+                                          type="button"
+                                          onClick={() => toggleLatePermission(rKey)}
+                                          className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold px-2.5 py-1.5 rounded-xl text-xs transition-all inline-flex items-center gap-1 shadow-xs cursor-pointer"
+                                          title="اعتماد استئذان صباحي ليشفع للمعلم ويكون عذراً رسمياً معفياً من الخصم"
+                                        >
+                                          <CheckCircle className="w-3.5 h-3.5 text-white" />
+                                          <span>اعتماد استئذان</span>
+                                        </button>
+                                      )}
+
+                                      <button
+                                        type="button"
+                                        onClick={() => handleOpenMessageModal(rKey)}
+                                        className={`font-bold px-2.5 py-1.5 rounded-xl text-xs transition-all inline-flex items-center gap-1 border cursor-pointer ${
+                                          isExcused
+                                            ? 'bg-emerald-50 text-emerald-800 hover:bg-emerald-100 border-emerald-200'
+                                            : 'bg-amber-50 text-amber-800 hover:bg-amber-100 border-amber-200'
+                                        }`}
+                                        title={isExcused ? 'إرسال إشعار رسمي باعتماد الاستئذان وعدم الخصم' : 'إرسال تنبيه تأخر رسمي عبر واتساب'}
+                                      >
+                                        <MessageSquare className="w-3.5 h-3.5" />
+                                        <span>{isExcused ? 'إشعار قبول' : 'تنبيه تأخير'}</span>
+                                      </button>
+
+                                      <button
+                                        type="button"
+                                        onClick={() => setEditingRecord(r)}
+                                        className="text-amber-700 bg-amber-50 hover:bg-amber-100 font-bold px-2.5 py-1.5 rounded-lg text-xs transition-all inline-flex items-center gap-1 cursor-pointer"
+                                        title="تعديل وقت البصمة وحالة الحضور"
+                                      >
+                                        <Edit className="w-3.5 h-3.5" />
+                                        <span>تعديل</span>
+                                      </button>
+                                    </div>
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                          {displayedLateList.length > 0 && (() => {
+                            const dispTotal = displayedLateList.reduce((sum, r) => sum + r.late, 0);
+                            const dispExcused = displayedLateList.filter(r => r.isLateExcused ?? isLateExcusedRecord(r)).reduce((sum, r) => sum + r.late, 0);
+                            const dispAccountable = dispTotal - dispExcused;
+                            return (
+                              <tfoot className="bg-amber-50/70 border-t-2 border-amber-300 font-bold text-xs text-slate-800">
+                                <tr>
+                                  <td colSpan={5} className="p-3 text-right text-amber-950 font-black">
+                                    📌 المجموع الإجمالي للتأخر في هذا الكشف: ({displayedLateList.length} حالة)
+                                  </td>
+                                  <td className="p-3 text-center">
+                                    <div className="flex flex-col items-center justify-center">
+                                      <span className="text-amber-900 font-black text-sm">{dispTotal} دقيقة</span>
+                                      <span className="text-[10px] text-amber-700 font-bold">({formatDurationToHoursArabic(dispTotal)})</span>
+                                      <div className="text-[9px] mt-0.5 flex items-center justify-center gap-1 font-semibold">
+                                        <span className="text-rose-700">خاضع: {dispAccountable} د</span>
+                                        <span>•</span>
+                                        <span className="text-emerald-700">معفى: {dispExcused} د</span>
+                                      </div>
+                                    </div>
+                                  </td>
+                                  <td className="p-3 text-center text-slate-400 text-[11px] font-medium">
+                                    —
+                                  </td>
+                                </tr>
+                              </tfoot>
+                            );
+                          })()}
+                        </table>
+                      </div>
                     </div>
                   </div>
-                </div>
-              )}
+                );
+              })()}
 
               {/* C. EARLY EXIT & ACCOUNTABILITY TAB */}
               {currentTab === 'early' && (
@@ -7614,15 +7997,31 @@ export default function App() {
 
                   {/* SUMMARY KPI CARDS FOR PERMISSIONS */}
                   {(() => {
-                    const permList = filterDailyRecords(dailyRecords).filter(r => isEmergencyLeave(r.status) || r.checkout === 'استئذان بدون بصمة انصراف' || r.checkout === 'استئذان طارئ موثق (بصمة)');
+                    const isPermRecord = (r: ParsedRow) => {
+                      const isLateExc = !!(r.isLateExcused ?? isLateExcusedRecord(r));
+                      return (
+                        isEmergencyLeave(r.status) ||
+                        r.checkout === 'استئذان بدون بصمة انصراف' ||
+                        r.checkout === 'استئذان طارئ موثق (بصمة)' ||
+                        (r.late > 0 && isLateExc)
+                      );
+                    };
+
+                    const permList = filterDailyRecords(dailyRecords).filter(isPermRecord);
                     let totalPermMins = 0;
                     let withExit = 0;
                     let withoutExit = 0;
+                    let morningPerms = 0;
 
                     permList.forEach(r => {
+                      const isLateExc = !!(r.isLateExcused ?? isLateExcusedRecord(r));
+                      const isMorning = r.late > 0 && isLateExc;
                       const dur = calculatePermissionDuration(r, config, permissionTimeOverrides[`${r.name}|${r.dateKey}`]);
                       totalPermMins += dur.minutes;
-                      if (r.tout && r.tout.total != null && r.tout.text !== '-') {
+
+                      if (isMorning) {
+                        morningPerms++;
+                      } else if (r.tout && r.tout.total != null && r.tout.text !== '-') {
                         withExit++;
                       } else {
                         withoutExit++;
@@ -7655,17 +8054,17 @@ export default function App() {
 
                         <div className="bg-white p-4 rounded-2xl border border-emerald-200 shadow-xs flex items-center justify-between">
                           <div>
-                            <span className="text-xs font-bold text-emerald-800">موثق ببصمة خروج</span>
-                            <div className="text-2xl font-black text-emerald-600 mt-1">{withExit} <span className="text-xs font-normal text-slate-400">حالة</span></div>
+                            <span className="text-xs font-bold text-emerald-800">استئذان صباحي مبرر</span>
+                            <div className="text-2xl font-black text-emerald-600 mt-1">{morningPerms} <span className="text-xs font-normal text-slate-400">حالة</span></div>
                           </div>
                           <div className="w-10 h-10 rounded-xl bg-emerald-50 text-emerald-700 flex items-center justify-center font-bold text-lg">
-                            ✓
+                            🌅
                           </div>
                         </div>
 
                         <div className="bg-white p-4 rounded-2xl border border-rose-200 shadow-xs flex items-center justify-between">
                           <div>
-                            <span className="text-xs font-bold text-rose-800">بدون بصمة انصراف</span>
+                            <span className="text-xs font-bold text-rose-800">انصراف بدون بصمة خروج</span>
                             <div className="text-2xl font-black text-rose-600 mt-1">{withoutExit} <span className="text-xs font-normal text-slate-400">حالة</span></div>
                           </div>
                           <div className="w-10 h-10 rounded-xl bg-rose-50 text-rose-700 flex items-center justify-center font-bold text-lg">
@@ -7710,14 +8109,15 @@ export default function App() {
                       </div>
 
                       <div>
-                        <label className="block text-[10px] font-bold text-slate-400 mb-1">حالة توثيق الاستئذان</label>
+                        <label className="block text-[10px] font-bold text-slate-400 mb-1">نوع وتوثيق الاستئذان</label>
                         <select
                           value={excuseSubFilter}
                           onChange={(e) => setExcuseSubFilter(e.target.value as any)}
                           className="bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-sm font-bold text-slate-700 outline-none focus:border-teal-500 transition-all"
                         >
                           <option value="all">كل الاستئذانات المسجلة</option>
-                          <option value="emergency_with_exit">✓ استئذان موثق ببصمة انصراف</option>
+                          <option value="morning">🌅 استئذان صباحي (تأخر مبرر شفع له)</option>
+                          <option value="emergency_with_exit">✓ انصراف مبكر موثق ببصمة</option>
                           <option value="emergency_no_exit">⚠️ استئذان بدون بصمة انصراف (مخالف)</option>
                         </select>
                       </div>
@@ -7737,7 +8137,7 @@ export default function App() {
                       <div className="flex items-end gap-2">
                         <button
                           onClick={handlePrintExcusesList}
-                          className="bg-sky-600 hover:bg-sky-700 text-white font-bold px-4 py-2 rounded-xl text-xs flex items-center gap-1.5 transition-all shadow-xs h-[38px]"
+                          className="bg-sky-600 hover:bg-sky-700 text-white font-bold px-4 py-2 rounded-xl text-xs flex items-center gap-1.5 transition-all shadow-xs h-[38px] cursor-pointer"
                           title="طباعة كشف الاستئذانات الرسمية بصيغة PDF"
                         >
                           <Printer className="w-4 h-4" />
@@ -7745,7 +8145,7 @@ export default function App() {
                         </button>
                         <button
                           onClick={handleExportExcusesListWord}
-                          className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold px-3 py-2 rounded-xl text-xs flex items-center gap-1.5 transition-all shadow-xs h-[38px]"
+                          className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold px-3 py-2 rounded-xl text-xs flex items-center gap-1.5 transition-all shadow-xs h-[38px] cursor-pointer"
                           title="تصدير كشف الاستئذانات الرسمية Word"
                         >
                           <FileDown className="w-4 h-4" />
@@ -7766,31 +8166,36 @@ export default function App() {
                             <th className="p-3 font-bold text-center">التاريخ</th>
                             <th className="p-3 font-bold text-center">اليوم</th>
                             <th className="p-3 font-bold text-center">نوع الاستئذان</th>
-                            <th className="p-3 font-bold text-center">بصمة الانصراف والتوثيق</th>
-                            <th className="p-3 font-bold text-center">مدة الاستئذان</th>
+                            <th className="p-3 font-bold text-center">التوثيق والبصمة</th>
+                            <th className="p-3 font-bold text-center">مدة وفترة الاستئذان</th>
                             <th className="p-3 font-bold text-center">المراسلة والتنبيه</th>
-                            <th className="p-3 font-bold text-center">نظام فارس</th>
+                            <th className="p-3 font-bold text-center">حالة الاعتماد</th>
                             <th className="p-3 font-bold text-center">تعديل الوقت</th>
                           </tr>
                         </thead>
                         <tbody>
                           {filterDailyRecords(dailyRecords)
                             .filter(r => {
-                              const isEm = isEmergencyLeave(r.status) || r.checkout === 'استئذان بدون بصمة انصراف' || r.checkout === 'استئذان طارئ موثق (بصمة)';
+                              const isLateExc = !!(r.isLateExcused ?? isLateExcusedRecord(r));
+                              const isMorning = r.late > 0 && isLateExc;
+                              const isEm = isEmergencyLeave(r.status) || r.checkout === 'استئذان بدون بصمة انصراف' || r.checkout === 'استئذان طارئ موثق (بصمة)' || isMorning;
                               if (!isEm) return false;
-                              if (excuseSubFilter === 'emergency_no_exit') return (!r.tout || r.tout.total == null || r.tout.text === '-');
-                              if (excuseSubFilter === 'emergency_with_exit') return !!(r.tout && r.tout.total != null && r.tout.text !== '-');
+                              if (excuseSubFilter === 'morning') return isMorning;
+                              if (excuseSubFilter === 'emergency_no_exit') return (!r.tout || r.tout.total == null || r.tout.text === '-') && !isMorning;
+                              if (excuseSubFilter === 'emergency_with_exit') return !!(r.tout && r.tout.total != null && r.tout.text !== '-') && !isMorning;
                               return true;
                             })
                             .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime())
                             .map((r, i) => {
                               const rKey = `${r.name}|${r.dateKey}`;
-                              const isEm = isEmergencyLeave(r.status) || r.checkout === 'استئذان بدون بصمة انصراف' || r.checkout === 'استئذان طارئ موثق (بصمة)';
+                              const isLateExc = !!(r.isLateExcused ?? isLateExcusedRecord(r));
+                              const isMorning = r.late > 0 && isLateExc;
+                              const isEm = isEmergencyLeave(r.status) || r.checkout === 'استئذان بدون بصمة انصراف' || r.checkout === 'استئذان طارئ موثق (بصمة)' || isMorning;
                               const hasNoExit = !r.tout || r.tout.total == null || r.tout.text === '-';
 
                               return (
                                 <tr key={i} className={`border-b border-slate-100 transition-all ${
-                                  isEm && hasNoExit ? 'bg-amber-50/40 hover:bg-amber-50/70' : 'hover:bg-slate-50'
+                                  isMorning ? 'bg-emerald-50/20 hover:bg-emerald-50/40' : (isEm && hasNoExit ? 'bg-amber-50/40 hover:bg-amber-50/70' : 'hover:bg-slate-50')
                                 }`}>
                                   <td className="p-3 font-bold text-slate-800">{r.name}</td>
                                   <td className="p-3 text-slate-400 text-xs">{r.job || '-'}</td>
@@ -7798,15 +8203,21 @@ export default function App() {
                                   <td className="p-3 text-center text-slate-500 text-xs font-semibold">{dayName(r.date)}</td>
                                   <td className="p-3 text-center">
                                     <span className={`font-bold text-[10px] px-2.5 py-0.5 rounded-full ${
-                                      isEm
-                                        ? 'bg-amber-100 text-amber-950 border border-amber-300'
-                                        : 'bg-blue-100 text-blue-800'
+                                      isMorning
+                                        ? 'bg-emerald-100 text-emerald-950 border border-emerald-300'
+                                        : (isEm
+                                            ? 'bg-amber-100 text-amber-950 border border-amber-300'
+                                            : 'bg-blue-100 text-blue-800')
                                     }`}>
-                                      {r.status || (isEm ? 'استئذان طارئ' : 'غياب مبرر')}
+                                      {isMorning ? 'استئذان صباحي (تأخر مبرر)' : (r.status || 'استئذان طارئ')}
                                     </span>
                                   </td>
                                   <td className="p-3 text-center">
-                                    {isEm ? (
+                                    {isMorning ? (
+                                      <span className="bg-emerald-100 text-emerald-800 border border-emerald-300 font-bold text-[10px] px-2.5 py-1 rounded-full">
+                                        ✓ باشر الحضور ({r.tin?.text || '-'})
+                                      </span>
+                                    ) : isEm ? (
                                       hasNoExit ? (
                                         <span className="bg-rose-100 text-rose-800 border border-rose-300 font-black text-[10px] px-2.5 py-1 rounded-full shadow-2xs">
                                           ⚠️ بدون بصمة خروج (مخالف)
@@ -7826,15 +8237,19 @@ export default function App() {
                                       return (
                                         <div className="inline-flex flex-col items-center justify-center gap-1">
                                           {/* Clean unified Duration Badge with embedded edit icon */}
-                                          <div className="inline-flex items-center gap-1.5 bg-amber-50 hover:bg-amber-100/80 text-amber-950 border border-amber-200/90 px-2.5 py-1 rounded-xl shadow-2xs transition-all">
-                                            <Clock className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                                          <div className={`inline-flex items-center gap-1.5 border px-2.5 py-1 rounded-xl shadow-2xs transition-all ${
+                                            isMorning 
+                                              ? 'bg-emerald-50 hover:bg-emerald-100/80 text-emerald-950 border-emerald-200/90'
+                                              : 'bg-amber-50 hover:bg-amber-100/80 text-amber-950 border-amber-200/90'
+                                          }`}>
+                                            <Clock className={`w-3.5 h-3.5 shrink-0 ${isMorning ? 'text-emerald-600' : 'text-amber-600'}`} />
                                             <span className="font-black text-xs">
                                               {dur.formattedText}
                                             </span>
                                             <button
                                               type="button"
                                               onClick={() => handleOpenPermissionTimeModal(r)}
-                                              className="text-amber-500 hover:text-amber-900 transition-colors p-0.5 rounded hover:bg-amber-200/50 cursor-pointer"
+                                              className="text-slate-400 hover:text-slate-900 transition-colors p-0.5 rounded hover:bg-slate-200/50 cursor-pointer"
                                               title="تعديل وقت وفترة الاستئذان يدوياً"
                                             >
                                               <Edit className="w-3 h-3" />
@@ -7854,27 +8269,35 @@ export default function App() {
                                   <td className="p-3 text-center">
                                     <button
                                       onClick={() => handleOpenMessageModal(rKey)}
-                                      className={`font-bold px-3 py-1.5 rounded-xl text-xs transition-all inline-flex items-center gap-1.5 shadow-xs ${
-                                        isEm && hasNoExit
+                                      className={`font-bold px-3 py-1.5 rounded-xl text-xs transition-all inline-flex items-center gap-1.5 shadow-xs cursor-pointer ${
+                                        isEm && hasNoExit && !isMorning
                                           ? 'bg-amber-100 hover:bg-amber-200 text-amber-950 border border-amber-300'
                                           : 'bg-slate-50 hover:bg-slate-100 text-slate-700'
                                       }`}
                                     >
-                                      <MessageSquare className={`w-3.5 h-3.5 ${isEm && hasNoExit ? 'text-amber-700' : 'text-blue-500'}`} />
-                                      <span>{isEm && hasNoExit ? 'تنبيه بصمة الخروج' : 'إشعار اعتماد'}</span>
+                                      <MessageSquare className={`w-3.5 h-3.5 ${isEm && hasNoExit && !isMorning ? 'text-amber-700' : 'text-blue-500'}`} />
+                                      <span>{isEm && hasNoExit && !isMorning ? 'تنبيه بصمة الخروج' : 'إشعار اعتماد'}</span>
                                     </button>
                                   </td>
                                   <td className="p-3 text-center">
-                                    {faresSubmitted[rKey] ? (
+                                    {isMorning && latePermissionsApproved[rKey] ? (
+                                      <button
+                                        onClick={() => toggleLatePermission(rKey)}
+                                        className="bg-rose-50 hover:bg-rose-100 text-rose-700 font-bold text-xs px-2.5 py-1.5 rounded-xl transition-all border border-rose-200 inline-flex items-center gap-1 cursor-pointer"
+                                      >
+                                        <Undo2 className="w-3.5 h-3.5" />
+                                        <span>إلغاء الاعتماد</span>
+                                      </button>
+                                    ) : faresSubmitted[rKey] ? (
                                       <button
                                         onClick={() => toggleFaresStatus(rKey)}
-                                        className="bg-rose-50 hover:bg-rose-100 text-rose-700 font-bold text-xs px-2.5 py-1.5 rounded-xl transition-all border border-rose-200 inline-flex items-center gap-1"
+                                        className="bg-rose-50 hover:bg-rose-100 text-rose-700 font-bold text-xs px-2.5 py-1.5 rounded-xl transition-all border border-rose-200 inline-flex items-center gap-1 cursor-pointer"
                                       >
                                         <Undo2 className="w-3.5 h-3.5" />
                                         <span>إلغاء الاعتماد</span>
                                       </button>
                                     ) : (
-                                      <span className="text-xs text-slate-400 italic">عذر معتمد بالبصمة</span>
+                                      <span className="text-xs text-slate-400 italic">عذر معتمد نظاماً</span>
                                     )}
                                   </td>
                                   <td className="p-3 text-center">
