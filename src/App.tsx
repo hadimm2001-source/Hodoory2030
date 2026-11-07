@@ -95,7 +95,6 @@ import {
 
 // Default Holidays String
 const DEFAULT_HOLIDAYS = `2025-09-23
-2025-10-12
 2025-11-21 إلى 2025-11-29
 2025-12-11 إلى 2025-12-14
 2026-01-09 إلى 2026-01-17
@@ -628,10 +627,11 @@ export default function App() {
         const punchCount = dateBiometricCounts.get(dk) || 0;
         const isAutoSuspended = (config.autoDetectSuspendedDays !== false) && punchCount === 0;
 
-        const isOffDay = isWeekendDay || isHolidayDay || isExplicitSuspended || isAutoSuspended;
+        // An off-day is ONLY skipped completely if ZERO biometrics were recorded across the entire school!
+        // If staff actually attended and punched in, it was an active workday and must NEVER be skipped!
+        const isEntireSchoolOff = (isWeekendDay || isHolidayDay || isExplicitSuspended || isAutoSuspended) && punchCount === 0;
         
-        // NEVER include weekends, holidays, suspended days, or non-imported dates in attendance/absence calculations
-        if (isOffDay) {
+        if (isEntireSchoolOff) {
           continue;
         }
 
@@ -718,8 +718,10 @@ export default function App() {
               earlyMins,
             };
           } else {
-            // No punch card for this day -> treated as Absence by default
+            // No punch card for this day:
+            // If it is a weekend, holiday, or suspended date, do NOT penalize with absence!
             const isFaresExcuse = faresSubmitted[key];
+            const isCalendarOff = isWeekendDay || isHolidayDay || isExplicitSuspended;
             baseRecord = {
               name: emp.name,
               job: emp.job,
@@ -727,13 +729,13 @@ export default function App() {
               date: new Date(d),
               dateKey: dk,
               month: monthKey(d),
-              status: isFaresExcuse ? 'غياب بعذر (فارس)' : 'غياب بدون عذر',
+              status: isCalendarOff ? 'عطلة أسبوعية / رسمية' : (isFaresExcuse ? 'غياب بعذر (فارس)' : 'غياب بدون عذر'),
               tin: null,
               tout: null,
               expected: null,
               checkout: '',
               earlyMins: 0,
-              type: isFaresExcuse ? 'excuse' : 'absence',
+              type: isCalendarOff ? 'other' : (isFaresExcuse ? 'excuse' : 'absence'),
               late: 0,
               isLateExcused: false,
               isMorningPermission: false,
@@ -753,8 +755,13 @@ export default function App() {
         const punchCount = dateBiometricCounts.get(dk) || 0;
         const isAutoSuspended = (config.autoDetectSuspendedDays !== false) && punchCount === 0;
 
-        if (isWeekendDay || isHolidayDay || isExplicitSuspended || isAutoSuspended) {
-          return; // Skip weekend/holiday/suspended completely
+        const hasBio = !!(imported.tin && imported.tin.total != null && imported.tin.text !== '-') ||
+                       !!(imported.tout && imported.tout.total != null && imported.tout.text !== '-') ||
+                       (imported.late || 0) > 0 || imported.type === 'present';
+        const isOff = (isWeekendDay || isHolidayDay || isExplicitSuspended || isAutoSuspended) && !hasBio;
+
+        if (isOff) {
+          return; // Skip weekend/holiday/suspended completely ONLY IF employee did not have biometric attendance
         }
         const k = `${imported.name}|${imported.dateKey}`;
         const isLateExc = !!(latePermissionsApproved[k] || isEmergencyLeave(imported.status) || faresSubmitted[k]);
@@ -1060,11 +1067,16 @@ export default function App() {
             let type: ParsedRow['type'] = 'absence';
             let finalStatus = status;
 
-            if (weekendWords.some(w => normalizedStatus.includes(w)) || isWeekendDay || isOfficialHoliday) {
+            // CRITICAL: If biometric punches exist (checked in or out), the employee physically attended!
+            // Biometric attendance MUST take priority over holiday/weekend calendars so attendance and tardiness are never suppressed.
+            if (hasBiometrics) {
+              type = 'present';
+              finalStatus = (status && !['غير مكتملة', 'غير مكتمله', 'انصراف تلقائي', 'بدون سجل بصمة', 'غائب', 'غياب'].includes(status)) ? status : 'حاضر';
+            } else if (weekendWords.some(w => normalizedStatus.includes(w)) || isWeekendDay || isOfficialHoliday) {
               type = 'other';
               finalStatus = 'عطلة أسبوعية / رسمية';
             } else if (isEmergency) {
-              type = hasBiometrics ? 'present' : 'excuse';
+              type = 'excuse';
               finalStatus = status || 'استئذان طارئ';
             } else if (isForcePresent) {
               type = 'present';
@@ -1072,9 +1084,6 @@ export default function App() {
             } else if (isExcuse) {
               type = 'excuse';
               finalStatus = status || 'غياب بعذر';
-            } else if (hasBiometrics) {
-              type = 'present';
-              finalStatus = (status && !['غير مكتملة', 'غير مكتمله', 'انصراف تلقائي', 'بدون سجل بصمة', 'غائب', 'غياب'].includes(status)) ? status : 'حاضر';
             } else {
               type = 'absence';
               finalStatus = (status && (status.includes('غياب') || status.includes('غائب'))) ? status : 'غياب بدون عذر';
@@ -1352,8 +1361,9 @@ export default function App() {
 
   const filterDailyRecords = (records: ParsedRow[]) => {
     return records.filter(r => {
-      // Exclude weekends and public holidays
-      if (isWeekend(r.date, config.weekend) || isHoliday(r.date, config.holidays)) {
+      // Exclude weekends and public holidays ONLY IF the employee was not present
+      const isOff = isWeekend(r.date, config.weekend) || isHoliday(r.date, config.holidays);
+      if (isOff && r.type !== 'present' && (r.late || 0) === 0 && !r.tin) {
         return false;
       }
 
@@ -1409,7 +1419,8 @@ export default function App() {
     if (selectedPeriodType === 'range') {
       // Dynamically compute range-based summaries directly from dailyRecords matching range & filters
       const matchingDaily = dailyRecords.filter(r => {
-        if (isWeekend(r.date, config.weekend) || isHoliday(r.date, config.holidays)) {
+        const isOff = isWeekend(r.date, config.weekend) || isHoliday(r.date, config.holidays);
+        if (isOff && r.type !== 'present' && (r.late || 0) === 0 && !r.tin) {
           return false;
         }
         const dk = dateKey(r.date);
@@ -1428,7 +1439,7 @@ export default function App() {
       const empMap = new Map<string, EmployeeSummary>();
       matchingDaily.forEach(r => {
         const isOff = isWeekend(r.date, config.weekend) || holidays.has(r.dateKey);
-        if (isOff && r.type !== 'present') {
+        if (isOff && r.type !== 'present' && (r.late || 0) === 0 && !r.tin) {
           return;
         }
 
@@ -1832,7 +1843,10 @@ export default function App() {
 
   const stats = getDisciplineStats();
 
-  const isExcludedDay = (d: any) => {
+  const isExcludedDay = (d: any, r?: ParsedRow) => {
+    if (r && (r.type === 'present' || (r.late || 0) > 0 || !!(r.tin && r.tin.total != null))) {
+      return false;
+    }
     const dk = dateKey(d);
     return isWeekend(d, config.weekend) || 
       isHoliday(d, config.holidays) || 
@@ -2107,8 +2121,8 @@ export default function App() {
     const [minKey, maxKey] = (startKey && endKey && startKey > endKey) ? [endKey, startKey] : [startKey, endKey];
 
     const records = dailyRecords.filter(r => {
-      // Exclude weekends, public holidays, and suspended dates
-      if (isExcludedDay(r.date)) {
+      // Exclude weekends, public holidays, and suspended dates ONLY IF not present
+      if (isExcludedDay(r.date, r)) {
         return false;
       }
       const matchName = name === 'all' || r.name === name;
